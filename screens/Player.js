@@ -122,8 +122,15 @@ export default function Player() {
   // infer mode when URL changes
   useEffect(() => {
     const url = currentUrl;
+    console.log("🎬 Player URL:", url);
+    console.log("📱 isDirectMediaUrl:", isDirectMediaUrl(url));
+    console.log("🌐 isEmbedHost:", isEmbedHost(url));
+    console.log("🔍 isLikelyWebView:", isLikelyWebView(url));
+    
     const web = isLikelyWebView(url);
     setIsWebViewMode(!!web);
+    console.log("📺 Mode sélectionné:", web ? "WebView" : "Video Native");
+    
     // if switching to video, remount
     setVideoKey(k => k + 1);
   }, [currentUrl]);
@@ -280,6 +287,18 @@ export default function Player() {
             onPlaybackStatusUpdate={(s) => {
               setStatus(() => s);
               setIsBuffering(!!s.isBuffering);
+              if (s.error) {
+                console.error("❌ Erreur de lecture vidéo:", s.error);
+              }
+            }}
+            onError={(error) => {
+              console.error("❌ Erreur Video component:", error);
+            }}
+            onLoad={(s) => {
+              console.log("✅ Vidéo chargée:", s);
+            }}
+            onLoadStart={() => {
+              console.log("🔄 Début du chargement vidéo");
             }}
           />
         ) : (
