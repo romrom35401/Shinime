@@ -26,7 +26,6 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { fetchEpisodesByTitle } from '../api/api';
 import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { db } from '../api/firebaseConfig';
-<<<<<<< HEAD
 import { testBackendConnectivity } from '../api/test-backend';
 import { getNewBackendUrl, getLegacyBackendUrl, getPrimaryBackendUrl, BACKEND_CONFIG } from '../api/config';
 
@@ -36,12 +35,6 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKEND_URL = getPrimaryBackendUrl(); // Utilise le backend principal (Render)
 const NEW_BACKEND_URL = getPrimaryBackendUrl(); // Même URL pour la compatibilité
 
-=======
-import { VideoExtractorV5 } from '../api/VideoExtractorV5'; // Import du nouveau extractor V5
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
->>>>>>> 56d85fc (Upadate all v7)
 // Couleurs Crunchyroll
 const COLORS = {
   primary: '#FF6B1A',
@@ -60,7 +53,6 @@ const COLORS = {
 };
 
 // ===============================
-<<<<<<< HEAD
 // 🚀 SERVICE D'EXTRACTION VIDÉO
 // ===============================
 
@@ -160,8 +152,6 @@ class VideoExtractor {
 }
 
 // ===============================
-=======
->>>>>>> 56d85fc (Upadate all v7)
 // 🛠️ HELPERS POUR PARSING
 // ===============================
 
