@@ -1,8 +1,9 @@
 // test-backend.js - Test de connectivité des backends
-import { getNewBackendUrl, getLegacyBackendUrl } from './config';
+import { getNewBackendUrl, getLegacyBackendUrl, getPrimaryBackendUrl } from './config';
 
 const NEW_BACKEND_URL = getNewBackendUrl();
 const LEGACY_BACKEND_URL = getLegacyBackendUrl();
+const PRIMARY_BACKEND_URL = getPrimaryBackendUrl();
 
 export async function testBackendConnectivity() {
   console.log('🔍 Test de connectivité des backends...');
@@ -67,6 +68,37 @@ export async function testBackendConnectivity() {
       ? `Backend${results.new.success && results.legacy.success ? 's' : ''} opérationnel${results.new.success && results.legacy.success ? 's' : ''}`
       : 'Aucun backend accessible'
   };
+}
+
+export async function testPrimaryBackend() {
+  console.log('🔍 Test du backend principal:', PRIMARY_BACKEND_URL);
+  
+  try {
+    const healthResponse = await fetch(`${PRIMARY_BACKEND_URL}/health`, {
+      method: 'GET',
+      timeout: 10000
+    });
+    
+    console.log(`✅ Backend principal health: ${healthResponse.status} ${healthResponse.statusText}`);
+    
+    if (healthResponse.ok) {
+      const data = await healthResponse.json();
+      return { 
+        success: true, 
+        message: 'Backend principal opérationnel',
+        data: data
+      };
+    } else {
+      return { 
+        success: false, 
+        error: `HTTP ${healthResponse.status}` 
+      };
+    }
+    
+  } catch (error) {
+    console.error('❌ Erreur backend principal:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 export async function testDirectVideoUrl(url) {
