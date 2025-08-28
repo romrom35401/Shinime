@@ -1,0 +1,452 @@
+// AnimeDetailsScreen.js
+// Expo / React Native
+// "Pépite" version avec :
+// - Poster plein écran FIXE en arrière-plan
+// - Gros Titre ultra-gras tout en haut (premier élément visible)
+// - Ombre dynamique qui monte au scroll
+// - GRAND espace avant le contenu (pour garder une grande image visible)
+// - "Fond noir collé" qui prend le relais derrière la description + les épisodes
+// - Footer lecteur fixe (LECTURE E1) + signet
+// - Onglets alignés (ÉPISODES / TITRES SIMILAIRES)
+// - Liste d’épisodes : miniature à droite + play overlay + durée + download
+// - Barre de contrôle : tri par date ↕ / "Tout synchronisé" / Télécharger
+// - En-tête section "La cité céleste"
+
+import React, { useMemo, useRef, useState } from "react";
+import {
+  View,
+  Text,
+  Image,
+  StyleSheet,
+  Animated,
+  ScrollView,
+  TouchableOpacity,
+  Dimensions,
+  SafeAreaView,
+  Platform,
+} from "react-native";
+import Ionicons from "@expo/vector-icons/Ionicons";
+import { LinearGradient } from "expo-linear-gradient";
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+const ORANGE = "#f47521";
+const BG = "#000";
+
+// Helpers
+const toFive = (avg) =>
+  typeof avg === "number" ? Math.max(0, Math.min(5, avg / 20)).toFixed(1) : "—";
+const formatCompact = (n) =>
+  typeof n === "number" ? Intl.NumberFormat("fr-FR", { notation: "compact" }).format(n) : "—";
+const formatDuration = (secs = 0) => {
+  const m = Math.max(0, Math.floor(secs / 60));
+  const s = Math.max(0, Math.floor(secs % 60));
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
+
+const Stars = ({ value = 0, size = 18, color = "#fff" }) => {
+  const v = Number(value);
+  const full = Math.floor(v);
+  const half = v - full >= 0.25 && v - full < 0.75;
+  return (
+    <View style={{ flexDirection: "row" }}>
+      {Array.from({ length: 5 }).map((_, i) => {
+        if (i < full) return <Ionicons key={i} name="star" size={size} color={color} />;
+        if (i === full && half) return <Ionicons key={i} name="star-half" size={size} color={color} />;
+        return <Ionicons key={i} name="star-outline" size={size} color={color} />;
+      })}
+    </View>
+  );
+};
+
+// Episode row (inchangé)
+function EpisodeRow({ anime, ep, index, onPlay }) {
+  return (
+    <View style={styles.episodeRow}>
+      <View style={styles.episodeMeta}>
+        <Text style={styles.episodeTitle} numberOfLines={1}>
+          {ep.title || `Épisode ${ep.number ?? index + 1}`}
+        </Text>
+        <Text style={styles.episodeSub}>Épisode {ep.number ?? index + 1}</Text>
+      </View>
+
+      <View style={styles.thumbWrap}>
+        <TouchableOpacity
+          style={styles.thumbTouchable}
+          onPress={() => onPlay?.(ep.number ?? index + 1)}
+          activeOpacity={0.85}
+        >
+          <Image source={ep.thumbnail ? { uri: ep.thumbnail } : undefined} style={styles.thumb} resizeMode="cover" />
+          <View style={styles.thumbPlayOverlay}>
+            <Ionicons name="play" size={18} color="#000" />
+          </View>
+          <View style={styles.durationBadge}>
+            <Text style={styles.durationText}>{formatDuration(ep.duration || 0)}</Text>
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.downloadBtn}>
+          <Ionicons name="download-outline" size={18} color={ORANGE} />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+export default function AnimeDetailsScreen({ route, navigation }) {
+  const anime = route?.params?.anime || {};
+  const [expanded, setExpanded] = useState(false);
+  const [sortDesc, setSortDesc] = useState(true);
+  const [activeTab, setActiveTab] = useState("episodes");
+  const [heroH, setHeroH] = useState(0); // hauteur mesurée du header (titre + méta + description + onglets)
+
+  const poster = useMemo(() => anime.posterImage || anime.bannerImage || "", [anime]);
+  const title = useMemo(() => anime.title || anime.title_romaji || anime.title_en || "—", [anime]);
+  const rating5 = useMemo(() => Number(toFive(anime.averageScore)), [anime]);
+  const votes = useMemo(() => (typeof anime.popularity === "number" ? anime.popularity : 92400), [anime]);
+
+  // Episodes fallback
+  const rawEpisodes = useMemo(() => {
+    if (Array.isArray(anime.episodes) && anime.episodes.length) return anime.episodes;
+    if (Array.isArray(anime.seasons?.[0]?.episodes) && anime.seasons[0].episodes.length) return anime.seasons[0].episodes;
+    return Array.from({ length: 12 }, (_, i) => ({
+      id: i + 1,
+      number: i + 1,
+      title: `Épisode ${i + 1}`,
+      duration: 23 * 60 + 42,
+      thumbnail: poster,
+      date: Date.now() - i * 86400000,
+    }));
+  }, [anime, poster]);
+
+  const episodes = useMemo(() => {
+    const list = [...rawEpisodes];
+    list.sort((a, b) => (sortDesc ? (b.date || 0) - (a.date || 0) : (a.date || 0) - (b.date || 0)));
+    return list;
+  }, [rawEpisodes, sortDesc]);
+
+  const cleanedDesc = (anime.description || "").replace(/<br\s*\/?>(\n)?/gi, "\n").replace(/<[^>]*>/g, "").trim();
+  const fullDesc = [title, cleanedDesc].filter(Boolean).join("\n\n");
+
+  // Layout sizes
+  const POSTER_H = Math.max(Math.round(SCREEN_WIDTH * 1.55), Math.round(SCREEN_HEIGHT * 0.62));
+  const FOOTER_H = 64;
+  const CONTENT_TOP = Math.max(Math.round(POSTER_H * 0.6), 360);
+  const HEADER_TOP = CONTENT_TOP + 16; // top absolu du header (correspond au paddingTop du ScrollView)
+  const SHEET_TOP = Math.round(HEADER_TOP + heroH); // nappe noire démarre juste après le header mesuré
+
+  // Animated shadow as before
+  const scrollY = useRef(new Animated.Value(0)).current;
+  const growH = scrollY.interpolate({
+    inputRange: [0, POSTER_H * 0.5, POSTER_H * 1.1],
+    outputRange: [0, POSTER_H * 0.55, POSTER_H],
+    extrapolate: "clamp",
+  });
+  const growOpacity = scrollY.interpolate({
+    inputRange: [0, POSTER_H * 0.25, POSTER_H * 0.9],
+    outputRange: [0, 0.55, 1],
+    extrapolate: "clamp",
+  });
+
+  const onPlay = (episodeNumber) =>
+    navigation.navigate?.("Player", {
+      anime,
+      season: anime.seasons?.[0],
+      episodeNumber,
+    });
+
+  return (
+    <View style={{ flex: 1, backgroundColor: BG }}>
+      {/* Poster fixed */}
+      <View style={[styles.posterFixedWrap, { height: POSTER_H }]}>
+        {!!poster && <Image source={{ uri: poster }} style={styles.posterFixed} resizeMode="cover" />}
+
+      </View>
+      {/* Intro Gradient (SOUS texte, SUR l'image) */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={["rgba(0,0,0,0)", "rgba(0,0,0,0.65)", "#000"]}
+        locations={[0, 0.65, 1]}
+        style={[styles.introGradient, { top: HEADER_TOP, height: Math.max(120, heroH + 24) }]}
+      />
+
+      {/* Solid black sheet (FIXE, au-dessus de l'image, sous ScrollView) */}
+      <View pointerEvents="none" style={[styles.blackSheet, { top: SHEET_TOP, bottom: 0 }]} />
+
+      {/* INTRO GRADIENT: transparent -> black, placé SOUS le texte mais SUR l'image
+          top = HEADER_TOP (le texte commence à paddingTop du ScrollView)
+          height dynamique = heroH + padding pour "introduire" le noir */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={["rgba(0,0,0,0)", "rgba(0,0,0,0.65)", "#000"]}
+        locations={[0, 0.65, 1]}
+        style={[styles.introGradient, { top: HEADER_TOP, height: Math.max(120, heroH + 24) }]}
+      />
+
+      {/* SOLID BLACK SHEET collée : démarre à SHEET_TOP et recouvre le reste */}
+      <View pointerEvents="none" style={[styles.blackSheet, { top: SHEET_TOP }]} />
+
+      {/* Top bar */}
+      <SafeAreaView style={styles.topBarSafe} pointerEvents="box-none">
+        <View style={styles.topBar}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.roundBtn}>
+            <Ionicons name="close" size={22} color="#fff" />
+          </TouchableOpacity>
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity style={styles.roundBtn}>
+            <Ionicons name="cast" size={20} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.roundBtn}>
+            <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+
+      {/* Scrollable content */}
+      <Animated.ScrollView
+        onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: false })}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: FOOTER_H + 28, paddingTop: CONTENT_TOP + 16 }}
+        showsVerticalScrollIndicator={false}
+        style={{ zIndex: 3 }}
+      >
+      <View style={{ position: "relative" }}>
+      <LinearGradient
+        pointerEvents="none"
+        colors={["rgba(0,0,0,0)", "rgba(0,0,0,0.65)", "#000"]}
+        locations={[0, 0.65, 1]}
+        style={{ position: "absolute", top: 0, left: 0, right: 0, height: Math.max(120, heroH + 24) }}
+      />
+      <View style={{ position: "absolute", top: heroH + 24, left: 0, right: 0, backgroundColor: "#000", height: 2000 }} />
+      </View>
+
+        
+
+
+      
+        {/* Header mesuré : on mesure tout ce qu'on veut "introduire" avant que la nappe noire commence */}
+        <View onLayout={(e) => setHeroH(e.nativeEvent.layout.height)} collapsable={false}>
+          <View style={styles.bigTitleWrap}>
+            <Text style={styles.bigTitle} numberOfLines={2}>
+              {title}
+            </Text>
+          </View>
+
+          <View style={styles.metaLine}>
+            <View style={styles.ageChip}>
+              <Text style={styles.ageText}>16+</Text>
+            </View>
+            <Text style={styles.metaSep}>·</Text>
+            <Text style={styles.metaText}>Doublage | Sous-titrage Français</Text>
+          </View>
+
+          <View style={styles.ratingRow}>
+            <Stars value={rating5} />
+            <Text style={styles.avgLabel}>
+              {"  "}Moyenne : <Text style={{ fontWeight: "800", color: "#fff" }}>{rating5.toFixed ? rating5.toFixed(1) : rating5}</Text>
+              <Text style={{ color: "#bbb" }}> {`(${formatCompact(votes)})`}</Text>
+            </Text>
+            <Ionicons name="chevron-down" size={16} color="#bbb" style={{ marginLeft: 4 }} />
+          </View>
+
+          <View style={styles.actionsRow}>
+            <TouchableOpacity style={styles.iconAction}>
+              <Ionicons name="add" size={28} color={ORANGE} />
+              <Text style={styles.actionLabel}>MA LISTE</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.iconAction}>
+              <Ionicons name="share-social" size={24} color={ORANGE} />
+              <Text style={styles.actionLabel}>PARTAGER</Text>
+            </TouchableOpacity>
+          </View>
+
+          {fullDesc.length > 0 && (
+            <>
+              <Text style={styles.description} numberOfLines={expanded ? undefined : 5}>
+                {fullDesc}
+              </Text>
+              <TouchableOpacity onPress={() => setExpanded((v) => !v)} activeOpacity={0.7}>
+                <Text style={styles.moreLink}>{expanded ? "RÉDUIRE" : "EN SAVOIR PLUS"}</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          <View style={styles.tabsRow}>
+            <TouchableOpacity style={[styles.tab, activeTab === "episodes" && styles.tabActive]} onPress={() => setActiveTab("episodes")}>
+              <Text style={activeTab === "episodes" ? styles.tabActiveText : styles.tabInactiveText}>ÉPISODES</Text>
+              {activeTab === "episodes" && <View style={styles.tabUnderline} />}
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.tab, activeTab === "similar" && styles.tabActive]} onPress={() => setActiveTab("similar")}>
+              <Text style={activeTab === "similar" ? styles.tabActiveText : styles.tabInactiveText}>TITRES SIMILAIRES</Text>
+              {activeTab === "similar" && <View style={styles.tabUnderline} />}
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.accordionRow}>
+            <Ionicons name="chevron-down" size={18} color="#ddd" />
+            <Text style={styles.accordionTitle} numberOfLines={1}>
+              {title}
+            </Text>
+          </View>
+        </View>
+
+        {/* ===== AFTER header: contenu sur la nappe noire ===== */}
+        {activeTab === "episodes" ? (
+          <>
+            <Text style={styles.sectionTitle}>La cité céleste</Text>
+
+            <View style={styles.controlBar}>
+              <TouchableOpacity style={styles.sortChip} onPress={() => setSortDesc((v) => !v)}>
+                <Ionicons name="swap-vertical" size={16} color="#fff" />
+                <Text style={styles.sortChipText}>{sortDesc ? "Date : récents" : "Date : anciens"}</Text>
+              </TouchableOpacity>
+              <Text style={styles.syncText}>Tout synchronisé</Text>
+              <TouchableOpacity style={styles.downloadAllBtn}>
+                <Ionicons name="download-outline" size={16} color="#000" />
+                <Text style={styles.downloadAllText}>Télécharger</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ paddingHorizontal: 12, gap: 10 }}>
+              {episodes.map((ep, idx) => (
+                <EpisodeRow key={ep.id ?? ep.number ?? idx} anime={anime} ep={ep} index={idx} onPlay={onPlay} />
+              ))}
+            </View>
+          </>
+        ) : (
+          <View style={styles.similarGrid}>
+            {(anime.similar || Array.from({ length: 6 }, (_, i) => ({ id: i, title: `Similaire ${i + 1}`, poster }))).map((it) => (
+              <View key={it.id} style={styles.similarCard}>
+                <Image source={it.poster ? { uri: it.poster } : undefined} style={styles.similarPoster} />
+                <Text numberOfLines={2} style={styles.similarTitle}>
+                  {it.title}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </Animated.ScrollView>
+
+      {/* Fixed footer */}
+      <SafeAreaView style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+        <View style={[styles.fixedFooter, { height: FOOTER_H }]}>
+          <TouchableOpacity style={styles.playBtn} onPress={() => onPlay(1)}>
+            <Ionicons name="play" size={20} color="#000" style={{ marginRight: 10 }} />
+            <Text style={styles.playText}>LECTURE E1</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.bookmarkBtn}>
+            <Ionicons name="bookmark-outline" size={22} color={ORANGE} />
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+// Styles (mise à jour pour gérer la nappe + gradient)
+const styles = StyleSheet.create({
+  posterFixedWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    zIndex: 0,
+    backgroundColor: "#111",
+  },
+  posterFixed: { ...StyleSheet.absoluteFillObject, width: SCREEN_WIDTH, height: "100%" },
+  posterBaseScrim: { ...StyleSheet.absoluteFillObject },
+  growingShadowContainer: { position: "absolute", left: 0, right: 0, bottom: 0 },
+
+  // intro gradient (transparent -> noir) positionnée dynamiquement
+  introGradient: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    zIndex: 2, // au-dessus du poster, en-dessous du ScrollView (zIndex ScrollView = 3)
+  },
+
+  // nappe noire collée
+  blackSheet: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: BG,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    zIndex: 1, // au-dessus du poster (0), sous le gradient (2) et le ScrollView (3)
+  },
+
+  topBarSafe: { position: "absolute", zIndex: 5, top: 0, left: 0, right: 0 },
+  topBar: { paddingTop: Platform.OS === "android" ? 8 : 0, paddingHorizontal: 8, flexDirection: "row", alignItems: "center" },
+  roundBtn: { height: 36, width: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.45)", marginHorizontal: 4 },
+
+  bigTitleWrap: { paddingHorizontal: 16, marginBottom: 6 },
+  bigTitle: {
+    color: "#fff",
+    fontSize: 38,
+    lineHeight: 42,
+    fontWeight: Platform.select({ ios: "900", android: "800" }),
+    textTransform: "uppercase",
+    textAlign: "center",
+    letterSpacing: 1,
+    textShadowColor: "rgba(0,0,0,0.9)",
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 12,
+  },
+
+  metaLine: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 16 },
+  ageChip: { backgroundColor: "#2a2a2a", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
+  ageText: { color: "#cfcfcf", fontWeight: "700", fontSize: 12 },
+  metaSep: { color: "#888", marginHorizontal: 8, fontSize: 14 },
+  metaText: { color: "#cfcfcf", fontSize: 13 },
+
+  ratingRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 16, marginTop: 10 },
+  avgLabel: { color: "#cfcfcf", fontSize: 14, marginLeft: 10 },
+
+  actionsRow: { flexDirection: "row", justifyContent: "center", gap: 48, paddingVertical: 16 },
+  iconAction: { alignItems: "center" },
+  actionLabel: { color: ORANGE, fontSize: 12, fontWeight: "800", marginTop: 6, letterSpacing: 0.4 },
+
+  description: { color: "#e6e6e6", fontSize: 15, lineHeight: 22, paddingHorizontal: 16, textAlign: "center", marginTop: 4 },
+  moreLink: { color: ORANGE, fontWeight: "800", textAlign: "center", marginTop: 10, letterSpacing: 0.4 },
+
+  tabsRow: { flexDirection: "row", paddingHorizontal: 16, marginTop: 18, alignItems: "flex-end", justifyContent: "center", gap: 24 },
+  tab: { height: 36, justifyContent: "flex-end", alignItems: "center", paddingBottom: 6 },
+  tabActiveText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+  tabInactiveText: { color: "#b3b3b3", fontWeight: "700", fontSize: 14 },
+  tabUnderline: { marginTop: 6, height: 3, width: 96, backgroundColor: ORANGE, borderRadius: 2 },
+
+  accordionRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, marginTop: 8, gap: 6, justifyContent: "center" },
+  accordionTitle: { color: "#c6c6c6", fontSize: 16 },
+
+  sectionTitle: { color: "#fff", fontWeight: "800", fontSize: 18, paddingHorizontal: 12, marginTop: 14 },
+
+  controlBar: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 12, marginTop: 10 },
+  sortChip: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#1f1f1f", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  sortChipText: { color: "#fff", fontWeight: "700", fontSize: 12 },
+  syncText: { color: "#cfcfcf", fontSize: 12, marginLeft: 2 },
+  downloadAllBtn: { marginLeft: "auto", flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: ORANGE, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 },
+  downloadAllText: { color: "#000", fontWeight: "800", fontSize: 12 },
+
+  episodeRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#0f0f0f", borderRadius: 10, padding: 10 },
+  episodeMeta: { flex: 1, paddingRight: 10 },
+  episodeTitle: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  episodeSub: { color: "#bdbdbd", fontSize: 12, marginTop: 4 },
+
+  thumbWrap: { width: 130, alignItems: "flex-end" },
+  thumbTouchable: { width: 120, height: 68, borderRadius: 8, overflow: "hidden", backgroundColor: "#1a1a1a" },
+  thumb: { width: "100%", height: "100%" },
+  thumbPlayOverlay: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.12)" },
+  durationBadge: { position: "absolute", right: 6, bottom: 6, backgroundColor: "rgba(0,0,0,0.75)", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  durationText: { color: "#fff", fontWeight: "700", fontSize: 11 },
+  downloadBtn: { marginTop: 8, width: 36, height: 36, borderRadius: 8, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: ORANGE },
+
+  similarGrid: { paddingHorizontal: 10, paddingTop: 10, flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between" },
+  similarCard: { width: (SCREEN_WIDTH - 10 * 2 - 10) / 2, backgroundColor: "#0f0f0f", borderRadius: 10, marginBottom: 10, overflow: "hidden" },
+  similarPoster: { width: "100%", aspectRatio: 2 / 3, backgroundColor: "#1a1a1a" },
+  similarTitle: { color: "#fff", fontWeight: "700", fontSize: 13, padding: 8 },
+
+  fixedFooter: { zIndex: 6, padding: 12, backgroundColor: "rgba(0,0,0,0.9)", flexDirection: "row", alignItems: "center", gap: 10 },
+  playBtn: { flex: 1, backgroundColor: ORANGE, borderRadius: 6, paddingVertical: 14, paddingHorizontal: 16, flexDirection: "row", alignItems: "center", justifyContent: "center" },
+  playText: { color: "#000", fontSize: 16, fontWeight: "800", letterSpacing: 0.8 },
+  bookmarkBtn: { width: 48, height: 48, borderRadius: 6, borderWidth: 2, borderColor: ORANGE, alignItems: "center", justifyContent: "center" },
+});

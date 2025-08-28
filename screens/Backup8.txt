@@ -1,0 +1,518 @@
+// HomeScreen.jsx
+import React, { useEffect, useRef, useState, useCallback, memo } from "react";
+import {
+  SafeAreaView,
+  View,
+  Text,
+  StyleSheet,
+  ImageBackground,
+  TouchableOpacity,
+  ScrollView,
+  Dimensions,
+  StatusBar,
+  Image,
+  Platform,
+  ActivityIndicator,
+  FlatList,
+} from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { BlurView } from "expo-blur";
+
+import colorsTheme from "../theme/colors";
+import {
+  fetchTrendingGrouped,
+  fetchTopRatedGrouped,
+  fetchCurrentSeasonGrouped,
+  fetchByGenreGrouped,
+  fetchFeaturedJikan,
+  fetchAniListImageCached,
+} from "../api/api";
+const USE_UNBLURRED_HERO = true
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+const POSTER_RATIO = 2 / 3;
+
+const colors = {
+  background: colorsTheme?.background || "#000",
+  text: colorsTheme?.text || "#fff",
+  textMuted: colorsTheme?.textLight || "#cfcfcf",
+  card: colorsTheme?.card || "#121212",
+  accent: colorsTheme?.accent || "#f47521",
+  border: colorsTheme?.border || "#1f1f1f",
+};
+const HERO_BG_MODE = "poster";
+/* ---------- Helpers couleur ---------- */
+function normalizeHex(hex) {
+  if (!hex) return null;
+  let h = String(hex).trim();
+  if (h.startsWith("#")) {
+    if (h.length === 4) {
+      h = "#" + h[1] + h[1] + h[2] + h[2] + h[3] + h[3];
+    }
+    return h.length === 7 ? h.toUpperCase() : null;
+  }
+  const m = h.match(/(\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})/);
+  if (m) {
+    const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
+    return rgbToHex(r, g, b);
+  }
+  return null;
+}
+function rgbToHex(r, g, b) {
+  const toHex = (n) => ("0" + Math.max(0, Math.min(255, Math.round(n))).toString(16)).slice(-2);
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+function hexToRgb(hex) {
+  const h = normalizeHex(hex) || "#000000";
+  const bigint = parseInt(h.slice(1), 16);
+  return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
+}
+function hexToRgba(hex, alpha = 1) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+function darkenHex(hex, percent = 30) {
+  const { r, g, b } = hexToRgb(hex);
+  const factor = 1 - percent / 100;
+  return rgbToHex(r * factor, g * factor, b * factor);
+}
+
+/* ---------- Filtre "vrai anime" réutilisable ---------- */
+// Astuce : déplace ceci dans ../utils/filterAnime.js et exporte-le si tu veux le partager partout.
+const allowedFormats = ["TV", "TV_SHORT", "OVA", "ONA", "MOVIE"];
+const filterAnime = (list = []) =>
+  (list || []).filter((a) => {
+    if (!a) return false;
+    if (!(a.posterImage || a.coverImage)) return false; // indispensable pour l'affichage
+    const f = a.format || a.subtype || a.type || null;
+    if (f && !allowedFormats.includes(String(f).toUpperCase())) return false;
+    // On écarte aussi certains titres "parasites" évidents si présents
+    const t = (a.title || a.title_en || a.title_romaji || "").toLowerCase();
+    if (/(live action|drama)/i.test(t)) return false;
+    return true;
+  });
+
+/* ---------- buildFeatured axé "moins connus" + récents ---------- */
+const buildFeatured = (seasonList = [], trendList = [], n = 5) => {
+  const currentYear = new Date().getFullYear();
+  const cutoffYear = currentYear - 2;
+
+  // Pool nettoyé
+  const base = filterAnime([...(seasonList || []), ...(trendList || [])]);
+
+  // Unicité
+  const seen = new Set();
+  const uniq = [];
+  for (const a of base) {
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    uniq.push(a);
+  }
+
+  // Filtre "hidden gems": récents + score correct + pas trop populaires
+  let filtered = uniq.filter((a) => {
+    const score = a.averageScore || 0;
+    const popularity = a.popularity || 99999;
+    const year = a.startDate?.year || a.year || 0;
+    return score >= 70 && popularity > 200 && year >= cutoffYear;
+  });
+
+  // Si pas assez, on relâche un peu (garde le filtre format via filterAnime)
+  if (filtered.length < n) {
+    filtered = uniq.filter((a) => (a.averageScore || 0) >= 70 && (a.popularity || 99999) > 200);
+  }
+
+  // Légère randomisation pour varier
+  filtered.sort(() => Math.random() - 0.5);
+
+  return filtered.slice(0, n).map((a) => ({
+    id: a.id,
+    title: a.title || a.title_en || a.title_romaji || "Sans titre",
+    desc: (a.description || "").replace(/<\/?[^>]+(>|$)/g, ""),
+    poster: a.posterImage || a.coverImage || a.image,
+    banner: a.bannerImage || a.posterImage || a.coverImage,
+    color: a.coverColor || null,
+    raw: a,
+  }));
+};
+
+/* ---------- Card composant (mémo) ---------- */
+const AnimeCard = memo(function AnimeCard({ item, onPress, cardWidth }) {
+  const [loading, setLoading] = useState(true);
+  const uri = item.posterImage || item.poster || item.coverImage || item.image;
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={() => onPress(item)} style={[styles.card, { width: cardWidth }]}>
+      <View style={{ flex: 1, backgroundColor: colors.card }}>
+        <Image source={{ uri }} resizeMode="cover" style={styles.cardImage} onLoadEnd={() => setLoading(false)} />
+        {loading && (
+          <View style={styles.cardPlaceholder}>
+            <ActivityIndicator size="small" color={colors.accent} />
+          </View>
+        )}
+      </View>
+      <Text style={styles.cardTitle} numberOfLines={2}>
+        {item.title || item.title_en || item.title_fr || item.title_romaji || "Sans titre"}
+      </Text>
+    </TouchableOpacity>
+  );
+});
+
+/* ---------- SectionRow: FlatList horizontal ---------- */
+function SectionRow({ title, data = [], onPressCard }) {
+  const clean = filterAnime(data);
+  if (!clean?.length) return null;
+  const cardWidth = Math.round(SCREEN_WIDTH * 0.34);
+  const renderItem = useCallback(
+    ({ item }) => <AnimeCard item={item} onPress={onPressCard} cardWidth={cardWidth} />,
+    [onPressCard, cardWidth]
+  );
+  return (
+    <View style={{ paddingTop: 18 }}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      <FlatList
+        horizontal
+        data={clean}
+        renderItem={renderItem}
+        keyExtractor={(it) => String(it.id)}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingHorizontal: 12 }}
+        initialNumToRender={4}
+        maxToRenderPerBatch={6}
+        windowSize={5}
+        removeClippedSubviews
+      />
+    </View>
+  );
+}
+
+/* ---------- Composant principal ---------- */
+export default function HomeScreen({ navigation }) {
+  const [loading, setLoading] = useState(true);
+  const [featured, setFeatured] = useState([]);
+  const [trending, setTrending] = useState([]);
+  const [topRated, setTopRated] = useState([]);
+  const [currentSeason, setCurrentSeason] = useState([]);
+  const [genreLists, setGenreLists] = useState({});
+
+  const heroRef = useRef(null);
+  const idxRef = useRef(0);
+  const [heroIdx, setHeroIdx] = useState(0);
+  const autoRef = useRef(null);
+
+  const goDetails = useCallback((anime) => {
+    navigation?.navigate?.("AnimeDetailsScreen", { anime });
+  }, [navigation]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        setLoading(true);
+        const [trend, top, season, gAction, gAdv, gCom, gRom] = await Promise.all([
+          fetchTrendingGrouped(30),
+          fetchTopRatedGrouped(30),
+          fetchCurrentSeasonGrouped(30),
+          fetchByGenreGrouped("Action", 20),
+          fetchByGenreGrouped("Adventure", 20),
+          fetchByGenreGrouped("Comedy", 20),
+          fetchByGenreGrouped("Romance", 20),
+        ]);
+
+        // Filtre global réutilisable pour TOUTES les listes
+        const cleanTrend = filterAnime(trend);
+        const cleanTop = filterAnime(top);
+        const cleanSeason = filterAnime(season);
+        const genres = {
+          Action: filterAnime(gAction || []),
+          Adventure: filterAnime(gAdv || []),
+          Comedy: filterAnime(gCom || []),
+          Romance: filterAnime(gRom || []),
+        };
+
+        // Featured (version "moins connu") sur base des listes filtrées (limité à 5)
+        let gems = buildFeatured(cleanSeason, cleanTrend, 5);
+
+        // Fallback: enrich avec Jikan si trop peu
+        if (gems.length < 4) {
+          try {
+            const jikan = await fetchFeaturedJikan(12);
+            const add = [];
+            for (const j of jikan) {
+              if (add.length + gems.length >= 5) break;
+              const img = await fetchAniListImageCached(j.title).catch(() => null);
+              add.push({
+                id: `jikan-${j.id}`,
+                title: j.title,
+                desc: j.synopsis_fr || j.title,
+                poster: img?.poster || j.cover || j.image,
+                banner: img?.banner || j.cover || j.image,
+                color: img?.color || null,
+                raw: j,
+              });
+            }
+            gems = [...gems, ...add].slice(0, 5);
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        // Exclure les featured des autres listes
+        const featuredIds = new Set(gems.map((g) => String(g.raw?.id || g.id)));
+        const strip = (arr) => (arr || []).filter((x) => !featuredIds.has(String(x.id)));
+
+        if (!mounted) return;
+        setFeatured(gems);
+        setTrending(strip(cleanTrend));
+        setTopRated(strip(cleanTop));
+        setCurrentSeason(strip(cleanSeason));
+        setGenreLists(genres);
+
+        // Prefetch images (poster + banner) pour limiter le flicker
+        try {
+          const urls = [];
+          gems.forEach((g) => {
+            if (g.poster) urls.push(g.poster);
+            if (g.banner) urls.push(g.banner);
+          });
+          await Promise.all(urls.map((u) => Image.prefetch(u).catch(() => null)));
+        } catch (_) {}
+      } catch (e) {
+        console.error("HomeScreen load error:", e);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+      clearInterval(autoRef.current);
+    };
+  }, []);
+
+  // Auto-slide HERO
+  useEffect(() => {
+    if (!featured.length) return;
+    clearInterval(autoRef.current);
+    idxRef.current = 0;
+    setHeroIdx(0);
+    autoRef.current = setInterval(() => {
+      if (!featured.length || !heroRef.current) return;
+      idxRef.current = (idxRef.current + 1) % featured.length;
+      heroRef.current.scrollToOffset({ offset: idxRef.current * SCREEN_WIDTH, animated: true });
+      setHeroIdx(idxRef.current);
+    }, 4500);
+    return () => clearInterval(autoRef.current);
+  }, [featured.length]);
+
+  const onHeroScroll = (ev) => {
+    const x = ev.nativeEvent.contentOffset.x;
+    const ix = Math.round(x / SCREEN_WIDTH);
+    if (ix !== heroIdx) {
+      idxRef.current = ix;
+      setHeroIdx(ix);
+    }
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={[styles.container, { alignItems: "center", justifyContent: "center" }] }>
+        <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+        <ActivityIndicator size="large" color={colors.accent} />
+        <Text style={{ color: colors.textMuted, marginTop: 12 }}>Chargement…</Text>
+      </SafeAreaView>
+    );
+  }
+
+  // cardWidth utilisé par les listes
+  const cardWidth = Math.round(SCREEN_WIDTH * 0.34);
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+
+      {/* Header gradient */}
+      <View pointerEvents="none" style={styles.headerGradientWrap}>
+        <LinearGradient
+          colors={["rgba(0,0,0,0.95)", "rgba(0,0,0,0)"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
+          style={styles.headerGradient}
+        />
+      </View>
+
+      {/* Header (logo + actions) */}
+      <View style={styles.headerBar}>
+        <View style={styles.logoDot}>
+          <Ionicons name="aperture-outline" size={18} color="#fff" />
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <TouchableOpacity>
+            <Ionicons name="search-outline" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 48 }}>
+        {/* HERO: slides hauteur fixe, blur upgrade, texte stable */}
+        <View>
+          <FlatList
+            data={featured}
+            horizontal
+            pagingEnabled
+            ref={heroRef}
+            keyExtractor={(it) => String(it.id)}
+            renderItem={({ item }) => {
+              const rawColor = item.color || item.raw?.coverColor || item.raw?.coverImage?.color || null;
+              const hex = normalizeHex(rawColor) || "#0D1117";
+              const c1 = hexToRgba(hex, 0.18);
+              const c2 = hexToRgba(darkenHex(hex, 35), 0.95);
+              const blurBg = Platform.OS === "android" ? 20 : 14; // blur modéré
+
+              return (
+                <TouchableOpacity activeOpacity={0.95} onPress={() => goDetails(item.raw || item)}>
+                  <ImageBackground source={{ uri: item.banner || item.poster }} style={styles.heroBg} resizeMode="cover" blurRadius={blurBg}>
+                    {/* Blur hardware + gradient de teinte */}
+                    <BlurView intensity={Platform.OS === "android" ? 55 : 65} tint="dark" style={StyleSheet.absoluteFill} />
+                    <LinearGradient colors={[c1, c2]} start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }} style={StyleSheet.absoluteFill} />
+
+                    {/* Dégradé bas inversé pour accueillir le fond noir de l'app */}
+                    <LinearGradient
+                      colors={["rgba(0,0,0,0)", colors.background]}
+                      start={{ x: 0.5, y: 0 }}
+                      end={{ x: 0.5, y: 1 }}
+                      style={styles.bottomHeroGradient}
+                      pointerEvents="none"
+                    />
+
+                    <View style={styles.heroStack}>
+                      {/* Poster */}
+                      <View style={styles.posterWrap}>
+                        <Image source={{ uri: item.poster }} style={styles.posterImg} resizeMode="cover" />
+                      </View>
+
+                      {/* Zone texte avec hauteurs figées pour ne JAMAIS bouger */}
+                      <View style={styles.heroTextArea}>
+                        <Text style={styles.heroMeta} numberOfLines={1}>16+ • Doublage | Sous-titres</Text>
+                        <Text style={styles.heroTitle} numberOfLines={1}>{item.title}</Text>
+                        <Text style={styles.heroDesc} numberOfLines={3}>{item.desc}</Text>
+
+                        <View style={styles.heroActions}>
+                          <TouchableOpacity style={styles.playBtn} onPress={() => goDetails(item.raw || item)}>
+                            <Ionicons name="play" size={18} color="#fff" style={{ marginRight: 8 }} />
+                            <Text style={styles.playBtnText}>COMMENCER À REGARDER S1 E1</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.saveBtn}>
+                            <Ionicons name="bookmark-outline" size={22} color="#fff" />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  </ImageBackground>
+                </TouchableOpacity>
+              );
+            }}
+            onScroll={onHeroScroll}
+            scrollEventThrottle={16}
+            showsHorizontalScrollIndicator={false}
+            initialNumToRender={1}
+            maxToRenderPerBatch={2}
+            windowSize={2}
+            removeClippedSubviews
+          />
+        </View>
+
+        {/* Segments (orange) placés ENTRE le hero et les catégories, sur fond noir */}
+        {!!featured.length && (
+          <View style={styles.heroSegmentsDock}>
+            {featured.map((_, i) => (
+              <View key={`seg-${i}`} style={styles.segmentTrack}>
+                <View style={[styles.segmentFill, { opacity: i === heroIdx ? 1 : 0.35 }]} />
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* Sections */}
+        <SectionRow title="Notre sélection pour vous" data={trending} onPressCard={goDetails} />
+        <SectionRow title="Mieux notés" data={topRated} onPressCard={goDetails} />
+        <SectionRow title="Saison en cours" data={currentSeason} onPressCard={goDetails} />
+        {Object.entries(genreLists).map(([g, list]) => (
+          <SectionRow key={g} title={g} data={list} onPressCard={goDetails} />
+        ))}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+/* ---------- Styles ---------- */
+const TEXT = {
+  metaLH: 16,
+  titleLH: 32,
+  descLH: 18,
+  descLines: 3,
+};
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+
+  headerGradientWrap: { position: "absolute", top: 0, left: 0, right: 0, height: 140, zIndex: 15 },
+  headerGradient: { flex: 1 },
+
+  headerBar: {
+    position: "absolute",
+    top: Platform.OS === "android" ? 36 : 44,
+    left: 14,
+    right: 14,
+    zIndex: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  logoDot: { width: 34, height: 34, borderRadius: 34, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
+
+  // HERO
+  heroBg: { width: SCREEN_WIDTH, height: SCREEN_HEIGHT * 0.82, justifyContent: "flex-end" },
+  heroStack: { flex: 1, justifyContent: "flex-end", paddingBottom: 10 },
+
+  // Poster: plus petit + "décroché" du haut pour un rendu clean
+  posterWrap: {
+    alignSelf: "center",
+    width: SCREEN_WIDTH * 0.72,
+    height: (SCREEN_WIDTH * 0.72) / POSTER_RATIO,
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: colors.card,
+    marginTop: 44,
+    elevation: 14,
+    shadowColor: "#000",
+    shadowOpacity: 0.25,
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 14,
+  },
+  posterImg: { width: "100%", height: "100%" },
+
+  // Dégradé bas pour fondre vers le noir
+  bottomHeroGradient: { position: "absolute", left: 0, right: 0, bottom: 0, height: 180 },
+
+  // Texte: hauteurs figées pour alignement identique sur tous les slides
+  heroTextArea: { paddingHorizontal: 16, paddingTop: 12 },
+  heroMeta: { color: "#e5e5e5", fontSize: 12, lineHeight: TEXT.metaLH, height: TEXT.metaLH, textAlign: "center", marginBottom: 6 },
+  heroTitle: { color: "#fff", fontSize: 28, fontWeight: "bold", lineHeight: TEXT.titleLH, height: TEXT.titleLH, textAlign: "center", marginBottom: 8 },
+  heroDesc: { color: "#ddd", fontSize: 14, lineHeight: TEXT.descLH, height: TEXT.descLH * TEXT.descLines, textAlign: "center", marginBottom: 12 },
+
+  heroActions: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16 },
+  playBtn: { backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "center", flexGrow: 1 },
+  playBtnText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
+  saveBtn: { marginLeft: 12, width: 48, height: 48, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(255,255,255,0.25)", backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center" },
+
+  // Segments orange sur fond noir, DOCK sous le hero
+  heroSegmentsDock: { flexDirection: "row", justifyContent: "center", alignItems: "center", paddingVertical: 10, backgroundColor: colors.background },
+  segmentTrack: { width: 34, height: 4, borderRadius: 4, overflow: "hidden", backgroundColor: "rgba(244,117,33,0.25)", marginHorizontal: 6 },
+  segmentFill: { width: "100%", height: "100%", backgroundColor: colors.accent },
+
+  // Sections
+  sectionTitle: { color: "#fff", fontSize: 18, fontWeight: "bold", paddingHorizontal: 12, marginBottom: 10 },
+  card: { marginRight: 12, borderRadius: 10, overflow: "hidden", backgroundColor: colors.card, width: Math.round(SCREEN_WIDTH * 0.34) },
+  cardImage: { width: "100%", height: Math.round(SCREEN_WIDTH * 0.34 * (3 / 2)) },
+  cardPlaceholder: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+  cardTitle: { color: "#eaeaea", fontSize: 12, marginTop: 6, paddingHorizontal: 4, textAlign: "center", height: 40 },
+});

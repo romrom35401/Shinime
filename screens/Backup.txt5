@@ -1,0 +1,337 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Dimensions,
+  ImageBackground,
+  Platform,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import colors from '../theme/colors';
+import AnimeSection from '../components/AnimeSection';
+import {
+  fetchFeaturedJikan,
+  fetchCurrentSeasonGrouped,
+  fetchByGenreGrouped,
+  fetchTrendingGrouped,
+  fetchTopRatedGrouped,
+  fetchAniListImage
+} from '../api/api';
+
+const { width, height } = Dimensions.get('window');
+const HERO_HEIGHT = height * 0.62;
+
+export default function HomeScreen({ navigation }) {
+  const [vedette, setVedette] = useState([]);
+  const [selection, setSelection] = useState([]);
+  const [tendances, setTendances] = useState([]);
+  const [mieuxNotes, setMieuxNotes] = useState([]);
+  const [nouveautes, setNouveautes] = useState([]);
+  const [action, setAction] = useState([]);
+  const [comedie, setComedie] = useState([]);
+  const [romance, setRomance] = useState([]);
+  const [fantasy, setFantasy] = useState([]);
+  const [scifi, setScifi] = useState([]);
+  const [aventure, setAventure] = useState([]);
+  const [drame, setDrame] = useState([]);
+  const [slice, setSlice] = useState([]);
+  const [sports, setSports] = useState([]);
+  const [horreur, setHorreur] = useState([]);
+  const [mecha, setMecha] = useState([]);
+  const [musique, setMusique] = useState([]);
+
+  const [indexActuel, setIndexActuel] = useState(0);
+  const [modeRecherche, setModeRecherche] = useState(false);
+  const [texteRecherche, setTexteRecherche] = useState('');
+  const [chargement, setChargement] = useState(true);
+  const [headerOpacity, setHeaderOpacity] = useState(0);
+
+  const scrollRef = useRef();
+
+  useEffect(() => {
+    async function charger() {
+      setChargement(true);
+      try {
+        // Vedettes via Jikan (top anime)
+        let hero = await fetchFeaturedJikan(10);
+        setVedette(hero);
+
+        // Sélection - Top Rated AniList, avec images enrichies
+        let top = await fetchTopRatedGrouped(10);
+        top = await Promise.all(top.map(async a => {
+          const hd = await fetchAniListImage(a.title);
+          return { ...a, image: hd.poster || a.image };
+        }));
+        setSelection(top);
+        setMieuxNotes(top);
+
+        // Tendances - AniList avec images enrichies
+        let trend = await fetchTrendingGrouped(12);
+        trend = await Promise.all(trend.map(async a => {
+          const hd = await fetchAniListImage(a.title);
+          return { ...a, image: hd.poster || a.image };
+        }));
+        setTendances(trend);
+
+        // Nouveautés - AniList avec images enrichies
+        let current = await fetchCurrentSeasonGrouped(12);
+        current = await Promise.all(current.map(async a => {
+          const hd = await fetchAniListImage(a.title);
+          return { ...a, image: hd.poster || a.image };
+        }));
+        setNouveautes(current);
+
+        // Catégories - AniList avec images enrichies
+        const genres = [
+          { setter: setAction, genre: 'Action' },
+          { setter: setComedie, genre: 'Comedy' },
+          { setter: setRomance, genre: 'Romance' },
+          { setter: setFantasy, genre: 'Fantasy' },
+          { setter: setScifi, genre: 'Sci-Fi' },
+          { setter: setAventure, genre: 'Adventure' },
+          { setter: setDrame, genre: 'Drama' },
+          { setter: setSlice, genre: 'Slice of Life' },
+          { setter: setSports, genre: 'Sports' },
+          { setter: setHorreur, genre: 'Horror' },
+          { setter: setMecha, genre: 'Mecha' },
+          { setter: setMusique, genre: 'Music' },
+        ];
+
+        await Promise.all(genres.map(async ({ setter, genre }) => {
+          let data = await fetchByGenreGrouped(genre, 12);
+          data = await Promise.all(data.map(async a => {
+            const hd = await fetchAniListImage(a.title);
+            return { ...a, image: hd.poster || a.image };
+          }));
+          setter(data);
+        }));
+
+      } catch (e) {
+        console.error(e);
+      }
+      setChargement(false);
+    }
+    charger();
+  }, []);
+
+  useEffect(() => {
+    if (!vedette.length) return;
+    const it = setInterval(() => {
+      const next = (indexActuel + 1) % vedette.length;
+      scrollRef.current?.scrollTo({ x: next * width, animated: true });
+      setIndexActuel(next);
+    }, 5000);
+    return () => clearInterval(it);
+  }, [indexActuel, vedette]);
+
+  const onScrollHorizontal = (e) => {
+    const newIndex = Math.round(e.nativeEvent.contentOffset.x / width);
+    if (newIndex !== indexActuel) setIndexActuel(newIndex);
+  };
+
+  const onScrollVertical = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    setHeaderOpacity(Math.min(y / 150, 1));
+  };
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      {/* Header flottant */}
+      <View style={[styles.header, { backgroundColor: `rgba(0,0,0,${headerOpacity})` }]}>
+        <View style={styles.logoContainer}>
+          <Ionicons name="logo-octocat" size={22} color={colors.primary} />
+          <Text style={styles.logoText}>Shinime</Text>
+        </View>
+        {modeRecherche ? (
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Rechercher un anime..."
+            placeholderTextColor={colors.textMuted}
+            value={texteRecherche}
+            onChangeText={setTexteRecherche}
+            autoFocus
+            onBlur={() => { setModeRecherche(false); setTexteRecherche(''); }}
+            returnKeyType="search"
+            maxLength={40}
+          />
+        ) : (
+          <TouchableOpacity onPress={() => setModeRecherche(v => !v)}>
+            <Ionicons name="search" size={20} color={colors.text} />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <ScrollView style={styles.container} onScroll={onScrollVertical} scrollEventThrottle={16}>
+        {/* HERO - Featured Animes full width */}
+        {chargement ? (
+          <ActivityIndicator size="large" color={colors.primary} style={{ height: HERO_HEIGHT }} />
+        ) : (
+          <ScrollView
+            ref={scrollRef}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onScroll={onScrollHorizontal}
+            scrollEventThrottle={16}
+            style={{ width }}
+          >
+            {vedette.map(anime => (
+              <ImageBackground
+                key={anime.id}
+                source={{ uri: anime.image || anime.cover }}
+                style={styles.heroImageFull}
+                imageStyle={{ resizeMode: 'cover' }}
+              >
+                <View style={styles.heroOverlay} />
+                <View style={styles.heroContent}>
+                  <Text style={styles.title}>
+                    {anime.title_fr || anime.title}
+                  </Text>
+                  <Text style={styles.subtitle}>
+                    {anime.type} • {anime.episodes || '??'} épisodes
+                  </Text>
+                  <Text numberOfLines={3} style={styles.description}>
+                    {anime.synopsis_fr || 'Synopsis indisponible.'}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <TouchableOpacity
+                      style={styles.button}
+                      onPress={() => navigation.navigate('AnimeDetails', { anime })}
+                    >
+                      <Text style={styles.buttonText}>Regarder</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.button, { backgroundColor: '#ffffff20' }]}
+                      onPress={() => { }}
+                    >
+                      <Text style={[styles.buttonText, { color: '#fff' }]}>
+                        Ajouter à ma liste
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </ImageBackground>
+            ))}
+          </ScrollView>
+        )}
+
+        {/* SECTIONS PRINCIPALES */}
+        <AnimeSection title="Sélection pour vous" animes={selection} navigation={navigation} />
+        <AnimeSection title="Tendances aujourd’hui" animes={tendances} navigation={navigation} />
+        <AnimeSection title="Mieux notés" animes={mieuxNotes} navigation={navigation} />
+        <AnimeSection title="Nouveautés (en cours)" animes={nouveautes} navigation={navigation} />
+
+        {/* CATÉGORIES */}
+        <AnimeSection title="Action" animes={action} navigation={navigation} />
+        <AnimeSection title="Comédie" animes={comedie} navigation={navigation} />
+        <AnimeSection title="Romance" animes={romance} navigation={navigation} />
+        <AnimeSection title="Fantasy" animes={fantasy} navigation={navigation} />
+        <AnimeSection title="Science‑fiction" animes={scifi} navigation={navigation} />
+        <AnimeSection title="Aventure" animes={aventure} navigation={navigation} />
+        <AnimeSection title="Drame" animes={drame} navigation={navigation} />
+        <AnimeSection title="Slice of life" animes={slice} navigation={navigation} />
+        <AnimeSection title="Sports" animes={sports} navigation={navigation} />
+        <AnimeSection title="Horreur" animes={horreur} navigation={navigation} />
+        <AnimeSection title="Mecha" animes={mecha} navigation={navigation} />
+        <AnimeSection title="Musique" animes={musique} navigation={navigation} />
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: colors.background,
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+  },
+  container: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  header: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    zIndex: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android'
+      ? StatusBar.currentHeight + 8
+      : 20,
+    paddingBottom: 10,
+    backgroundColor: 'transparent',
+  },
+  logoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  logoText: {
+    fontSize: 20,
+    fontFamily: colors.fontBold,
+    color: colors.primary,
+    marginLeft: 6,
+  },
+  searchInput: {
+    flex: 1,
+    height: 36,
+    marginLeft: 12,
+    borderRadius: 8,
+    backgroundColor: colors.surface,
+    color: colors.text,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  },
+  heroImageFull: {
+    width: width,
+    height: HERO_HEIGHT,
+    justifyContent: 'flex-end',
+  },
+  heroOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  heroContent: {
+    padding: 20,
+    paddingTop: 64,
+  },
+  title: {
+    fontSize: 26,
+    fontFamily: colors.fontBold,
+    color: colors.text,
+    marginBottom: 4,
+  },
+  subtitle: {
+    fontSize: 16,
+    fontFamily: colors.fontRegular,
+    color: colors.textMuted,
+    marginBottom: 8,
+  },
+  description: {
+    fontSize: 14,
+    fontFamily: colors.fontRegular,
+    color: colors.text,
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  button: {
+    backgroundColor: colors.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 22,
+  },
+  buttonText: {
+    color: '#fff',
+    fontFamily: colors.fontBold,
+    fontSize: 14,
+  },
+});

@@ -1,0 +1,274 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Animated,
+  ActivityIndicator,
+  Dimensions,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  Platform,
+  ImageBackground,
+  Keyboard
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import colors from '../theme/colors';
+import {
+  fetchTrendingGrouped,
+  fetchTopRatedGrouped,
+  fetchCurrentSeasonGrouped,
+  fetchFeaturedJikan,
+} from '../api/api';
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+export default function HomeScreen({ navigation }) {
+  const [search, setSearch] = useState('');
+  const [trending, setTrending] = useState([]);
+  const [topRated, setTopRated] = useState([]);
+  const [currentSeason, setCurrentSeason] = useState([]);
+  const [featured, setFeatured] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [searchActive, setSearchActive] = useState(false);
+
+  const searchAnim = useRef(new Animated.Value(0)).current;
+  const searchTimeout = useRef(null);
+
+  useEffect(() => {
+    loadInitialData();
+  }, []);
+
+  async function loadInitialData() {
+    setIsLoading(true);
+    const [trend, top, season, feat] = await Promise.all([
+      fetchTrendingGrouped(12),
+      fetchTopRatedGrouped(12),
+      fetchCurrentSeasonGrouped(12),
+      fetchFeaturedJikan(6), // Featured pour le HERO
+    ]);
+    setTrending(trend);
+    setTopRated(top);
+    setCurrentSeason(season);
+    setFeatured(feat);
+    setIsLoading(false);
+  }
+
+  // Animation barre de recherche
+  const toggleSearch = () => {
+    const toValue = searchActive ? 0 : 1;
+    setSearchActive(!searchActive);
+    Animated.timing(searchAnim, {
+      toValue,
+      duration: 300,
+      useNativeDriver: false
+    }).start(() => {
+      if (!searchActive) Keyboard.dismiss();
+    });
+  };
+
+  const searchHeight = searchAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 50],
+  });
+
+  const renderAnimeCard = (anime, index) => (
+    <TouchableOpacity
+      key={index}
+      style={styles.animeCard}
+      activeOpacity={0.7}
+      onPress={() => navigation.navigate('AnimeDetailsScreen', { anime })}
+    >
+      <ImageBackground
+        source={{ uri: anime.posterImage || anime.image || anime.coverImage || 'https://via.placeholder.com/300x450' }}
+        style={styles.animeImage}
+        resizeMode="cover"
+        imageStyle={{ borderRadius: 12 }}
+      >
+        <View style={styles.animeOverlay}>
+          <Text style={styles.animeTitle} numberOfLines={2}>
+            {anime.title || anime.title_en || anime.title_romaji}
+          </Text>
+        </View>
+      </ImageBackground>
+    </TouchableOpacity>
+  );
+
+  // HERO FEATURED (60% écran)
+  const renderFeaturedHero = () => (
+    <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}>
+      {featured.map((anime, index) => (
+        <TouchableOpacity
+          key={index}
+          activeOpacity={0.9}
+          onPress={() => navigation.navigate('AnimeDetailsScreen', { anime })}
+        >
+          <ImageBackground
+            source={{ uri: anime.cover || anime.image }}
+            style={styles.featuredHero}
+            resizeMode="cover"
+          >
+            <View style={styles.heroOverlay}>
+              <Text style={styles.heroTitle}>{anime.title}</Text>
+            </View>
+          </ImageBackground>
+        </TouchableOpacity>
+      ))}
+    </ScrollView>
+  );
+
+  if (isLoading) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <ActivityIndicator size="large" color={colors.accent} />
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle={Platform.OS === 'ios' ? 'dark-content' : 'light-content'} />
+
+      {/* HEADER superposé */}
+      <View style={styles.header}>
+        <Text style={styles.appName}>MyAnimeApp</Text>
+        <TouchableOpacity onPress={toggleSearch}>
+          <Ionicons name="search" size={28} color="#fff" />
+        </TouchableOpacity>
+      </View>
+
+      {/* Barre de recherche animée */}
+      <Animated.View style={[styles.searchContainer, { height: searchHeight, opacity: searchAnim }]}>
+        <Ionicons name="search" size={20} color={colors.text} />
+        <TextInput
+          placeholder="Rechercher un anime..."
+          placeholderTextColor={colors.textLight}
+          style={styles.searchInput}
+          value={search}
+          onChangeText={setSearch}
+          returnKeyType="search"
+          autoFocus={searchActive}
+        />
+      </Animated.View>
+
+      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+        {/* ✅ FEATURED HERO tout en haut */}
+        {renderFeaturedHero()}
+
+        {!searchActive && (
+          <>
+            <Text style={styles.sectionTitle}>🔥 Tendances</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingLeft: 12 }}>
+              {trending.map(renderAnimeCard)}
+            </ScrollView>
+
+            <Text style={styles.sectionTitle}>🏆 Mieux notés</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingLeft: 12 }}>
+              {topRated.map(renderAnimeCard)}
+            </ScrollView>
+
+            <Text style={styles.sectionTitle}>📺 Saison en cours</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingLeft: 12 }}>
+              {currentSeason.map(renderAnimeCard)}
+            </ScrollView>
+
+            <Text style={styles.sectionTitle}>🎬 Classiques</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingLeft: 12 }}>
+              {topRated.slice(0, 8).map(renderAnimeCard)} 
+            </ScrollView>
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+
+  // Header superposé
+  header: {
+    position: 'absolute',
+    top: 40,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  appName: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+
+  // Recherche
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    overflow: 'hidden',
+    marginHorizontal: 12,
+    marginTop: 100, // sous header
+    marginBottom: 10,
+  },
+  searchInput: {
+    marginLeft: 8,
+    flex: 1,
+    color: colors.text,
+    fontSize: 16,
+  },
+
+  // Sections
+  sectionTitle: {
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginLeft: 12,
+    marginVertical: 10,
+  },
+  animeCard: {
+    width: SCREEN_WIDTH * 0.35,
+    height: SCREEN_WIDTH * 0.5,
+    marginRight: 12,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  animeImage: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  animeOverlay: {
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  animeTitle: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+
+  // HERO Featured (60% de l’écran)
+  featuredHero: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT * 0.6,
+    justifyContent: 'flex-end',
+  },
+  heroOverlay: {
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 16,
+  },
+  heroTitle: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+});
