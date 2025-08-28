@@ -60,6 +60,7 @@ class VideoExtractor {
     
     if (this.isDirectVideo(url)) return url;
     
+    console.log("🆕 NOUVEAU CODE VIDÉO EXTRACTOR V2.0 CHARGÉ - SUPPORT HLS ACTIVÉ");
     console.log(`🔧 Tentative d'extraction pour: ${url.slice(0, 100)}...`);
     
     // Essayer différents paramètres d'extraction
