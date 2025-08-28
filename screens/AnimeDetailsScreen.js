@@ -25,13 +25,13 @@ import { fetchEpisodesByTitle } from '../api/api';
 import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { db } from '../api/firebaseConfig';
 import { testBackendConnectivity } from '../api/test-backend';
-import { getNewBackendUrl, getLegacyBackendUrl, BACKEND_CONFIG } from '../api/config';
+import { getNewBackendUrl, getLegacyBackendUrl, getPrimaryBackendUrl, BACKEND_CONFIG } from '../api/config';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // Configuration backend
-const BACKEND_URL = getLegacyBackendUrl();
-const NEW_BACKEND_URL = getNewBackendUrl();
+const BACKEND_URL = getPrimaryBackendUrl(); // Utilise le backend principal (Render)
+const NEW_BACKEND_URL = getPrimaryBackendUrl(); // Même URL pour la compatibilité
 
 // Couleurs Crunchyroll
 const COLORS = {

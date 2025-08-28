@@ -11,7 +11,10 @@ export const BACKEND_CONFIG = {
   legacy: 'https://video-extractor-wqlx.onrender.com',
   
   // Nouveau backend (votre backend Render)
-  new: 'https://video-extractor-wqlx.onrender.com', // Remplacez par votre vraie URL Render
+  new: 'https://video-extractor-wqlx.onrender.com', // TODO: Remplacer par votre vraie URL Render
+  
+  // URL principale à utiliser
+  primary: 'https://video-extractor-wqlx.onrender.com' // URL de votre serveur Render principal
   
   // Timeouts
   timeout: {
@@ -29,6 +32,11 @@ export function getNewBackendUrl() {
 // Fonction pour obtenir l'URL de l'ancien backend
 export function getLegacyBackendUrl() {
   return BACKEND_CONFIG.legacy;
+}
+
+// Fonction pour obtenir l'URL principale du backend
+export function getPrimaryBackendUrl() {
+  return BACKEND_CONFIG.primary;
 }
 
 // Configuration des headers par défaut
