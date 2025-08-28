@@ -103,7 +103,13 @@ class VideoExtractor {
           console.log("🔍 Test URL:", data.url, "Type:", data.type);
           if (data.url && /\.(mp4|m3u8)(\?|$)/i.test(data.url)) {
             console.log("✅ URL vidéo extraite avec succès:", data.type, data.quality);
-            return data.url;
+            console.log("📋 Headers retournés:", data.headers);
+            return {
+              url: data.url,
+              headers: data.headers || {},
+              type: data.type,
+              quality: data.quality
+            };
           }
           
           if (data.error) {
@@ -115,7 +121,12 @@ class VideoExtractor {
             const bestStream = data.streams.find(s => s.url && /\.(mp4|m3u8)(\?|$)/i.test(s.url));
             if (bestStream) {
               console.log("✅ Stream vidéo trouvé:", bestStream.type);
-              return bestStream.url;
+              return {
+                url: bestStream.url,
+                headers: bestStream.headers || data.headers || {},
+                type: bestStream.type,
+                quality: bestStream.quality
+              };
             }
           }
           
@@ -796,16 +807,24 @@ export default function AnimeDetailsScreen() {
            for (const url of validUrls) {
              try {
                console.log("🔄 Tentative extraction avec:", url);
-               const directUrl = await VideoExtractor.extractVideoUrl(url);
+               const extractionResult = await VideoExtractor.extractVideoUrl(url);
+               
+               // Maintenant extractionResult est toujours un objet
+               const finalUrl = extractionResult.url;
+               const finalHeaders = extractionResult.headers || {};
+               
+               console.log("🎯 URL finale:", finalUrl);
+               console.log("📋 Headers:", finalHeaders);
                
                setResolving(false);
                setResolvingMsg("");
                navigation.navigate("Player", { 
                  episode: { 
                    ...episode, 
-                   url: directUrl,
+                   url: finalUrl,
                    originalUrl: url,
-                   anime: anime
+                   anime: anime,
+                   streamHeaders: finalHeaders
                  } 
                });
                return;
