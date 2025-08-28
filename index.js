@@ -25,7 +25,7 @@ console.log('🔍 Environment check:');
 console.log(`- NODE_ENV: ${process.env.NODE_ENV}`);
 console.log(`- PORT: ${PORT}`);
 console.log(`- Firebase Service Account: ${process.env.FIREBASE_SERVICE_ACCOUNT ? 'Present' : 'Missing'}`);
-console.log(`- Firebase Database URL: ${process.env.FIREBASE_DATABASE_URL ? 'Present' : 'Missing'}`);
+console.log(`- Firestore mode: Using Firestore (no database URL needed)`);
 
 // 4. ✅ IMPORTS CONDITIONNELS AVEC GESTION D'ERREUR
 let cheerio, axios, NodeCache, admin;
@@ -40,20 +40,41 @@ try {
   process.exit(1);
 }
 
-// 5. ✅ FIREBASE AVEC GESTION D'ERREUR
+// 5. ✅ FIREBASE AVEC GESTION D'ERREUR (FIRESTORE)
 try {
   admin = require('firebase-admin');
   
-  // Vérifier que les variables d'environnement Firebase sont présentes
-  if (!process.env.FIREBASE_SERVICE_ACCOUNT || !process.env.FIREBASE_DATABASE_URL) {
-    console.warn('⚠️ Firebase credentials missing - Firebase features disabled');
+  // Pour Firestore, on n'a besoin que du SERVICE_ACCOUNT
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+    console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT missing - Firebase features disabled');
     admin = null;
   } else {
-    admin.initializeApp({
-      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
-      databaseURL: process.env.FIREBASE_DATABASE_URL
-    });
-    console.log('✅ Firebase initialized');
+    console.log('🔧 Initializing Firebase with Firestore...');
+    
+    // Parser le service account JSON
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      console.log('✅ Service account parsed successfully');
+    } catch (parseError) {
+      console.error('❌ Invalid FIREBASE_SERVICE_ACCOUNT JSON:', parseError.message);
+      admin = null;
+      throw parseError;
+    }
+    
+    // Configuration pour Firestore (pas besoin de databaseURL)
+    const firebaseConfig = {
+      credential: admin.credential.cert(serviceAccount)
+    };
+    
+    // Ajouter le projectId si présent dans le service account
+    if (serviceAccount.project_id) {
+      firebaseConfig.projectId = serviceAccount.project_id;
+      console.log(`📝 Project ID: ${serviceAccount.project_id}`);
+    }
+    
+    admin.initializeApp(firebaseConfig);
+    console.log('✅ Firebase/Firestore initialized successfully');
   }
 } catch (error) {
   console.error('❌ Firebase initialization failed:', error.message);
