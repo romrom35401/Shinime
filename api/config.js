@@ -14,7 +14,7 @@ export const BACKEND_CONFIG = {
   new: 'https://video-extractor-wqlx.onrender.com', // TODO: Remplacer par votre vraie URL Render
   
   // URL principale à utiliser
-  primary: 'https://video-extractor-wqlx.onrender.com' // URL de votre serveur Render principal
+  primary: 'https://video-extractor-wqlx.onrender.com', // URL de votre serveur Render principal
   
   // Timeouts
   timeout: {
