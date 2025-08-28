@@ -62,64 +62,80 @@ class VideoExtractor {
     
     console.log(`🔧 Tentative d'extraction pour: ${url.slice(0, 100)}...`);
     
-    for (let attempt = 1; attempt <= retryCount; attempt++) {
-      try {
-        console.log(`🔄 Tentative ${attempt}/${retryCount}...`);
-        
-        const response = await fetch(
-          `${BACKEND_URL}/api/extract?url=${encodeURIComponent(url)}&prefer=mp4`,
-          {
+    // Essayer différents paramètres d'extraction
+    const extractParams = [
+      'format=hls', // HLS en priorité
+      'prefer=mp4', // MP4 si disponible
+      ''            // Sans paramètre spécifique
+    ];
+    
+    for (const params of extractParams) {
+      for (let attempt = 1; attempt <= retryCount; attempt++) {
+        try {
+          console.log(`🔄 Tentative ${attempt}/${retryCount} avec ${params || 'paramètres par défaut'}...`);
+          
+          const extractUrl = `${BACKEND_URL}/api/extract?url=${encodeURIComponent(url)}${params ? '&' + params : ''}`;
+          const response = await fetch(extractUrl, {
             method: 'GET',
             headers: { 
               'Accept': 'application/json',
               'User-Agent': 'Shinime/1.0'
             },
-            timeout: 20000
+            timeout: 15000
+          });
+          
+          console.log(`📡 Réponse backend: ${response.status} ${response.statusText}`);
+          
+          if (!response.ok) {
+            // Pour les erreurs 500, essayer avec le paramètre suivant
+            if (response.status === 500) {
+              console.warn(`⚠️ Erreur 500, essai avec paramètre suivant...`);
+              break; // Sortir des tentatives pour ce paramètre
+            }
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
           }
-        );
-        
-        console.log(`📡 Réponse backend: ${response.status} ${response.statusText}`);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        console.log("📦 Données reçues:", data);
-        
-        // N'accepter que le MP4 pour Expo Go
-        if (data.url && /\.mp4(\?|$)/i.test(data.url)) {
-          console.log("✅ URL vidéo extraite avec succès");
-          return data.url;
-        }
-        
-        if (data.error) {
-          throw new Error(data.error);
-        }
-        
-        if (data.streams && Array.isArray(data.streams) && data.streams.length > 0) {
-          // Format alternatif avec streams
-          const bestStream = data.streams.find(s => s.url && /\.mp4(\?|$)/i.test(s.url));
-          if (bestStream) {
-            console.log("✅ Stream vidéo trouvé");
-            return bestStream.url;
+          
+          const data = await response.json();
+          console.log("📦 Données reçues:", data);
+          
+          // Accepter MP4 et HLS (m3u8) pour Expo Go
+          if (data.url && /\.(mp4|m3u8)(\?|$)/i.test(data.url)) {
+            console.log("✅ URL vidéo extraite avec succès:", data.type, data.quality);
+            return data.url;
           }
+          
+          if (data.error) {
+            throw new Error(data.error);
+          }
+          
+          if (data.streams && Array.isArray(data.streams) && data.streams.length > 0) {
+            // Format alternatif avec streams
+            const bestStream = data.streams.find(s => s.url && /\.(mp4|m3u8)(\?|$)/i.test(s.url));
+            if (bestStream) {
+              console.log("✅ Stream vidéo trouvé:", bestStream.type);
+              return bestStream.url;
+            }
+          }
+          
+          throw new Error("Pas de lien vidéo valide dans la réponse");
+          
+        } catch (error) {
+          console.warn(`❌ Tentative ${attempt}/${retryCount} échouée:`, error.message);
+          
+          if (attempt === retryCount) {
+            // Si c'est la dernière tentative pour ce paramètre, continuer avec le suivant
+            console.log(`🔄 Passage au paramètre suivant après échec avec: ${params || 'défaut'}`);
+            break;
+          }
+          
+          const delayMs = 1000 * attempt;
+          console.log(`⏳ Attente ${delayMs}ms avant nouvelle tentative...`);
+          await this.delay(delayMs);
         }
-        
-        throw new Error("Pas de lien MP4 valide dans la réponse");
-        
-      } catch (error) {
-        console.warn(`❌ Tentative ${attempt}/${retryCount} échouée:`, error.message);
-        
-        if (attempt === retryCount) {
-          throw new Error(`Échec extraction après ${retryCount} tentatives: ${error.message}`);
-        }
-        
-        const delayMs = 1000 * Math.pow(2, attempt - 1);
-        console.log(`⏳ Attente ${delayMs}ms avant nouvelle tentative...`);
-        await this.delay(delayMs);
       }
     }
+    
+    throw new Error(`Échec extraction après ${retryCount} tentatives avec tous les paramètres`);
   }
   
   static isDirectVideo(url) {
