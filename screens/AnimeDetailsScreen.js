@@ -99,6 +99,7 @@ class VideoExtractor {
           console.log("📦 Données reçues:", data);
           
           // Accepter MP4 et HLS (m3u8) pour Expo Go
+          console.log("🔍 Test URL:", data.url, "Type:", data.type);
           if (data.url && /\.(mp4|m3u8)(\?|$)/i.test(data.url)) {
             console.log("✅ URL vidéo extraite avec succès:", data.type, data.quality);
             return data.url;
