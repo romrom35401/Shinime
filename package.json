@@ -11,7 +11,7 @@
   "dependencies": {
     "@expo-google-fonts/roboto": "^0.4.0",
     "@expo/vector-icons": "^14.1.0",
-    "@react-native-async-storage/async-storage": "2.1.2",
+    "@react-native-async-storage/async-storage": "^2.1.2",
     "@react-native-community/blur": "^4.4.1",
     "@react-native-community/cli": "latest",
     "@react-native-community/masked-view": "^0.1.11",
@@ -24,15 +24,16 @@
     "@react-navigation/native-stack": "^7.3.25",
     "@react-navigation/stack": "^7.4.7",
     "cheerio": "^1.1.2",
-    "expo": "~53.0.20",
+    "expo": "^53.0.22",
     "expo-av": "~15.1.7",
     "expo-blur": "~14.1.5",
     "expo-file-system": "^18.1.11",
     "expo-linear-gradient": "~14.1.5",
     "expo-media-library": "^17.1.7",
-    "expo-navigation-bar": "~4.2.7",
+    "expo-navigation-bar": "~4.2.8",
     "expo-screen-orientation": "~8.1.7",
     "expo-status-bar": "~2.2.3",
+    "expo-video": "~2.2.2",
     "firebase": "^12.1.0",
     "node-fetch": "^3.3.2",
     "react": "19.0.0",
@@ -44,12 +45,12 @@
     "react-native-orientation-locker": "^1.7.0",
     "react-native-reanimated": "~3.17.4",
     "react-native-reanimated-carousel": "^4.0.3",
-    "react-native-safe-area-context": "^5.6.0",
-    "react-native-screens": "^4.13.1",
+    "react-native-safe-area-context": "^5.4.0",
+    "react-native-screens": "~4.11.1",
     "react-native-system-navigation-bar": "^2.6.4",
     "react-native-vector-icons": "^10.3.0",
     "react-native-video": "^6.16.1",
-    "react-native-webview": "^13.16.0"
+    "react-native-webview": "^13.13.5"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0"

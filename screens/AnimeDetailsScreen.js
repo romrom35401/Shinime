@@ -1,4 +1,6 @@
-// AnimeDetailsScreen.js - Interface Crunchyroll-like
+// AnimeDetailsScreen V2.0 - Compatible VideoExtractor V5 + Player V2
+// Migration vers expo-video + backend V6 + gestion d'erreurs robuste
+
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -24,6 +26,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { fetchEpisodesByTitle } from '../api/api';
 import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { db } from '../api/firebaseConfig';
+<<<<<<< HEAD
 import { testBackendConnectivity } from '../api/test-backend';
 import { getNewBackendUrl, getLegacyBackendUrl, getPrimaryBackendUrl, BACKEND_CONFIG } from '../api/config';
 
@@ -33,6 +36,12 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BACKEND_URL = getPrimaryBackendUrl(); // Utilise le backend principal (Render)
 const NEW_BACKEND_URL = getPrimaryBackendUrl(); // Même URL pour la compatibilité
 
+=======
+import { VideoExtractorV5 } from '../api/VideoExtractorV5'; // Import du nouveau extractor V5
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+>>>>>>> 56d85fc (Upadate all v7)
 // Couleurs Crunchyroll
 const COLORS = {
   primary: '#FF6B1A',
@@ -51,6 +60,7 @@ const COLORS = {
 };
 
 // ===============================
+<<<<<<< HEAD
 // 🚀 SERVICE D'EXTRACTION VIDÉO
 // ===============================
 
@@ -150,6 +160,8 @@ class VideoExtractor {
 }
 
 // ===============================
+=======
+>>>>>>> 56d85fc (Upadate all v7)
 // 🛠️ HELPERS POUR PARSING
 // ===============================
 
@@ -161,7 +173,7 @@ function normalizeTitleForSeasonKey(title) {
   if (!title) return "";
   return stripDiacritics(title)
     .toLowerCase()
-    .replace(/[\[\]\(\):_.,'â€™!Â¡?Â¿]/g, " ")
+    .replace(/[\[\]\(\):_.,'™!¡?¿]/g, " ")
     .replace(/\b(tv|ona|ova|special|movie|edition|uncut|uncensored)\b/gi, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
@@ -184,7 +196,7 @@ function buildIdCandidatesFromTitles(titles = []) {
 function normalizeEpisodeLanguages(e = {}) {
   const out = {};
   if (!e || typeof e !== "object") return out;
-
+  
   const push = (k, v) => {
     if (!k || v == null) return;
     const kk = String(k).toUpperCase();
@@ -200,6 +212,7 @@ function normalizeEpisodeLanguages(e = {}) {
   if (e.languages && typeof e.languages === "object") {
     for (const k of Object.keys(e.languages)) push(k, e.languages[k]);
   }
+
   if (e.LANGUAGES && typeof e.LANGUAGES === "object") {
     for (const k of Object.keys(e.LANGUAGES)) push(k, e.LANGUAGES[k]);
   }
@@ -214,17 +227,15 @@ function normalizeEpisodeLanguages(e = {}) {
 
 function pickBestUrlFromEpisode(ep = {}, preferredLangs = ["VOSTFR","VF","FR","VO","SUB","DEFAULT"]) {
   if (!ep) return null;
-
   if (ep.url) return ep.url;
   if (ep.video) return ep.video;
   if (ep.link) return ep.link;
-
+  
   const normalized = normalizeEpisodeLanguages(ep);
 
   // Fonction pour valider une URL
   const isValidVideoUrl = (url) => {
     if (!url || typeof url !== 'string') return false;
-    
     // Rejeter les URLs publicitaires et de redirection
     const invalidPatterns = [
       /^intent:\/\//i,
@@ -238,24 +249,23 @@ function pickBestUrlFromEpisode(ep = {}, preferredLangs = ["VOSTFR","VF","FR","V
       /pixel\./i,
       /beacon\./i
     ];
-    
     return !invalidPatterns.some(pattern => pattern.test(url));
   };
 
   // Essayer d'abord les URLs qui fonctionnent mieux
-  const preferredHosts = ['sibnet.ru', 'sendvid.com', 'vk.com'];
-  
+  const preferredHosts = ['sibnet.ru', 'sendvid.com', 'vk.com', 'vidmoly.net'];
+
   for (const lang of preferredLangs) {
     const arr = normalized[lang];
     if (!arr || !arr.length) continue;
-    
+
     // Chercher d'abord les URLs des hôtes préférés
     for (const url of arr) {
       if (url && isValidVideoUrl(url) && preferredHosts.some(host => url.includes(host))) {
         return url;
       }
     }
-    
+
     // Sinon prendre la première URL valide
     for (const url of arr) {
       if (url && isValidVideoUrl(url)) {
@@ -308,16 +318,15 @@ async function tryFetchFromFirestore(titleVariants = []) {
         for (const d of snap.docs) {
           const dat = d.data();
           const norm = (dat.normalized || d.id || "").toLowerCase();
-          
           if (norms.some((n) => new RegExp("^" + n.replace(/-/g, "[- ]?") + "$", "i").test(norm))) {
             return { id: d.id, data: dat, collection: colName };
           }
-          
-          const titlesAll = Array.isArray(dat.titlesAll) ? dat.titlesAll : 
-                           (Array.isArray(dat.title_variants) ? dat.title_variants : []);
+
+          const titlesAll = Array.isArray(dat.titlesAll) ? dat.titlesAll :
+            (Array.isArray(dat.title_variants) ? dat.title_variants : []);
           
           for (const cand of titleVariants) {
-            if (titlesAll && titlesAll.some((t) => 
+            if (titlesAll && titlesAll.some((t) =>
               String(t || "").toLowerCase() === String(cand || "").toLowerCase())) {
               return { id: d.id, data: dat, collection: colName };
             }
@@ -336,6 +345,7 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
   if (docData?.episodes && typeof docData.episodes === "object" && !Array.isArray(docData.episodes)) {
     for (const [seasonName, arr] of Object.entries(docData.episodes)) {
       if (!Array.isArray(arr)) continue;
+      
       const eps = arr.map((e, idx) => {
         const number = e.index ?? e.number ?? idx + 1;
         const title = e.name ?? e.title ?? `Épisode ${number}`;
@@ -346,11 +356,12 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
         flat.push(ep);
         return ep;
       });
+      
       seasons.push({ season: seasonName, episodes: eps });
     }
   }
 
-  const seasonalKeys = Object.keys(docData || {}).filter(k => 
+  const seasonalKeys = Object.keys(docData || {}).filter(k =>
     /^saison\s*\d+/i.test(k) || /^season\s*\d+/i.test(k)
   );
   
@@ -369,13 +380,14 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
       flat.push(ep);
       return ep;
     });
+    
     seasons.push({ season: sk, episodes: eps });
   }
 
   if (Array.isArray(docData.seasons) && docData.seasons.length > 0) {
     for (const s of docData.seasons) {
-      const epsArr = (docData.episodes && docData.episodes[s]) || 
-                     (docData.bySeason && docData.bySeason[s]) || [];
+      const epsArr = (docData.episodes && docData.episodes[s]) ||
+        (docData.bySeason && docData.bySeason[s]) || [];
       if (!Array.isArray(epsArr) || epsArr.length === 0) continue;
       if (seasons.find(x => x.season === s)) continue;
       
@@ -389,6 +401,7 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
         flat.push(ep);
         return ep;
       });
+      
       seasons.push({ season: s, episodes: eps });
     }
   }
@@ -406,17 +419,18 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
         flat.push(ep);
         return ep;
       });
+      
       seasons.push({ season: "Saison 1", episodes: eps });
     }
   }
 
   if (flat.length === 0 && docData?.url) {
-    const ep = { 
-      id: docData.id || docData.title || fallbackTitle, 
-      number: 1, 
-      title: docData.title || fallbackTitle, 
-      languages: { DEFAULT: [docData.url] }, 
-      thumbnail: docData.thumbnail 
+    const ep = {
+      id: docData.id || docData.title || fallbackTitle,
+      number: 1,
+      title: docData.title || fallbackTitle,
+      languages: { DEFAULT: [docData.url] },
+      thumbnail: docData.thumbnail
     };
     seasons.push({ season: "Saison 1", episodes: [ep] });
     flat.push(ep);
@@ -432,14 +446,14 @@ function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
 }
 
 // ===============================
-// 🎬 COMPOSANT PRINCIPAL
+// 🎬 COMPOSANT PRINCIPAL V2.0
 // ===============================
 
-export default function AnimeDetailsScreen() {
+export default function AnimeDetailsScreenV2() {
   const navigation = useNavigation();
   const route = useRoute();
   const anime = route?.params?.anime || {};
-  
+
   // États
   const [animeData, setAnimeData] = useState(null);
   const [episodes, setEpisodes] = useState([]);
@@ -453,7 +467,7 @@ export default function AnimeDetailsScreen() {
   const [expandedDescription, setExpandedDescription] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [resolvingMsg, setResolvingMsg] = useState("");
-  
+
   // Animations
   const scrollY = useRef(new Animated.Value(0)).current;
   const headerOpacity = scrollY.interpolate({
@@ -461,210 +475,164 @@ export default function AnimeDetailsScreen() {
     outputRange: [0, 1],
     extrapolate: 'clamp',
   });
-  
+
   // Titre et poster de l'anime
-  const title = useMemo(() => 
-    anime.title || anime.title_romaji || anime.title_en || "—", 
+  const title = useMemo(() =>
+    anime.title || anime.title_romaji || anime.title_en || "—",
     [anime]
   );
-  
-  const poster = useMemo(() => 
-    anime.posterImage || anime.bannerImage || anime.image || "", 
+
+  const poster = useMemo(() =>
+    anime.posterImage || anime.bannerImage || anime.image || "",
     [anime]
   );
-  
+
   // ===============================
-  // 📡 CHARGEMENT DES DONNÉES
+  // 📡 CHARGEMENT DES DONNÉES V2.0
   // ===============================
-  
+
   const loadAnimeData = useCallback(async () => {
     try {
       setLoading(true);
-      
-      console.log("📡 Chargement des données pour:", title);
-      
-                    // 1️⃣ Essai API principale en priorité (car elle fonctionne)
-       console.log("🔄 Tentative API principale en priorité...");
-       const providerRes = await fetchEpisodesByTitle(title);
-       
-       console.log("📊 Résultat API:", {
-         type: typeof providerRes,
-         isArray: Array.isArray(providerRes),
-         length: Array.isArray(providerRes) ? providerRes.length : 'N/A',
-         hasGrouped: providerRes && typeof providerRes === 'object' && 'grouped' in providerRes,
-         firstEpisode: Array.isArray(providerRes) && providerRes.length > 0 ? providerRes[0] : null
-       });
-       
-       if (providerRes) {
-         let seasonsArr = [];
-         let flat = [];
+      console.log("📡 V2 Chargement des données pour:", title);
 
-         if (Array.isArray(providerRes) && providerRes.length > 0) {
-           const map = new Map();
-           
-           providerRes.forEach((e, idx) => {
-             const seasonRaw = e.season ?? e.saison ?? e.season_number ?? e.seasonLabel ?? "Saison 1";
-             const seasonLabel = typeof seasonRaw === "number" ? `Saison ${seasonRaw}` : String(seasonRaw || "Saison 1");
-             const number = e.number ?? e.index ?? idx + 1;
+      // 1️⃣ Essai API principale en priorité
+      console.log("🔄 V2 Tentative API principale...");
+      const providerRes = await fetchEpisodesByTitle(title);
 
-             const langs = normalizeEpisodeLanguages(e);
+      console.log("📊 V2 Résultat API:", {
+        type: typeof providerRes,
+        isArray: Array.isArray(providerRes),
+        length: Array.isArray(providerRes) ? providerRes.length : 'N/A',
+        hasGrouped: providerRes && typeof providerRes === 'object' && 'grouped' in providerRes,
+        firstEpisode: Array.isArray(providerRes) && providerRes.length > 0 ? providerRes[0] : null
+      });
 
-             const ep = {
-               id: e.id ?? `${seasonLabel}-${number}`,
-               number,
-               title: e.name ?? e.title ?? `Épisode ${number}`,
-               languages: langs,
-               date: e.date ?? e.release_date ?? null,
-               thumbnail: e.thumbnail,
-             };
+      if (providerRes) {
+        let seasonsArr = [];
+        let flat = [];
 
-             if (!map.has(seasonLabel)) map.set(seasonLabel, []);
-             map.get(seasonLabel).push(ep);
-           });
+        if (Array.isArray(providerRes) && providerRes.length > 0) {
+          const map = new Map();
+          providerRes.forEach((e, idx) => {
+            const seasonRaw = e.season ?? e.saison ?? e.season_number ?? e.seasonLabel ?? "Saison 1";
+            const seasonLabel = typeof seasonRaw === "number" ? `Saison ${seasonRaw}` : String(seasonRaw || "Saison 1");
+            const number = e.number ?? e.index ?? idx + 1;
+            const langs = normalizeEpisodeLanguages(e);
+            
+            const ep = {
+              id: e.id ?? `${seasonLabel}-${number}`,
+              number,
+              title: e.name ?? e.title ?? `Épisode ${number}`,
+              languages: langs,
+              date: e.date ?? e.release_date ?? null,
+              thumbnail: e.thumbnail,
+            };
 
-           seasonsArr = Array.from(map.entries()).map(([s, eps]) => ({ season: s, episodes: eps }));
-           seasonsArr.sort((a, b) => {
-             const na = parseInt((a.season.match(/\d+/) || [9999])[0]);
-             const nb = parseInt((b.season.match(/\d+/) || [9999])[0]);
-             return na - nb;
-           });
-           flat = seasonsArr.flatMap((s) => s.episodes);
+            if (!map.has(seasonLabel)) map.set(seasonLabel, []);
+            map.get(seasonLabel).push(ep);
+          });
 
-           // Vérifier si les épisodes ont des URLs
-           const hasUrls = flat.some(ep => {
-             const langs = ep.languages || {};
-             return Object.keys(langs).length > 0 && Object.values(langs).some(arr => Array.isArray(arr) && arr.length > 0);
-           });
+          seasonsArr = Array.from(map.entries()).map(([s, eps]) => ({ season: s, episodes: eps }));
+          seasonsArr.sort((a, b) => {
+            const na = parseInt((a.season.match(/\d+/) || [9999])[0]);
+            const nb = parseInt((b.season.match(/\d+/) || [9999])[0]);
+            return na - nb;
+          });
 
-           console.log("🔍 Vérification URLs dans API:", {
-             episodesCount: flat.length,
-             hasUrls: hasUrls,
-             sampleEpisode: flat[0] ? {
-               id: flat[0].id,
-               languages: flat[0].languages,
-               languagesKeys: Object.keys(flat[0].languages || {})
-             } : null
-           });
+          flat = seasonsArr.flatMap((s) => s.episodes);
 
-           // Si pas d'URLs dans l'API, continuer vers Firestore
-           if (!hasUrls) {
-             console.log("⚠️ Pas d'URLs dans l'API, tentative Firestore...");
-           } else {
-             setSeasons(seasonsArr);
-             setEpisodes(flat);
-             const idxS1 = seasonsArr.findIndex(s => /^saison\s*1/i.test(s.season));
-             if (idxS1 >= 0) setSelectedSeason(seasonsArr[idxS1].season);
-             setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
-             setLoading(false);
-             return;
-           }
-         }
+          // Vérifier si les épisodes ont des URLs
+          const hasUrls = flat.some(ep => {
+            const langs = ep.languages || {};
+            return Object.keys(langs).length > 0 && Object.values(langs).some(arr => Array.isArray(arr) && arr.length > 0);
+          });
 
-         if (typeof providerRes === "object" && providerRes.grouped && Array.isArray(providerRes.grouped)) {
-           seasonsArr = providerRes.grouped.map((g) => ({
-             season: g.season || g.title || g.name || "Saison",
-             episodes: (g.episodes || []).map((e, idx) => ({
-               id: e.id ?? `${g.season}-${idx}`,
-               number: e.number ?? e.index ?? idx + 1,
-               title: e.name ?? e.title ?? `Épisode ${idx + 1}`,
-               languages: normalizeEpisodeLanguages(e),
-               date: e.date ?? e.release_date ?? null,
-               thumbnail: e.thumbnail,
-             })),
-           }));
-           flat = seasonsArr.flatMap((g) => g.episodes || []);
+          console.log("🔍 V2 Vérification URLs dans API:", {
+            episodesCount: flat.length,
+            hasUrls: hasUrls,
+            sampleEpisode: flat[0] ? {
+              id: flat[0].id,
+              languages: flat[0].languages,
+              languagesKeys: Object.keys(flat[0].languages || {})
+            } : null
+          });
 
-           setSeasons(seasonsArr);
-           setEpisodes(flat);
-           if (seasonsArr.length > 0) setSelectedSeason(seasonsArr[0].season);
-           setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
-           setLoading(false);
-           return;
-         }
-       }
-
-               // 2️⃣ Fallback Firestore (si API échoue)
-        console.log("🔄 Fallback vers Firestore...");
-        const titleVariants = [
-          anime.title,
-          anime.title_en,
-          anime.title_romaji,
-          ...(anime.title_variants || []),
-        ].filter(Boolean);
-        
-        console.log("🔍 Variantes de titre:", titleVariants);
-        
-                 // Essayer d'abord avec l'ID exact de l'anime
-         let docFound = null;
-         if (anime.id) {
-           console.log("🔍 Tentative avec ID exact:", anime.id);
-           try {
-             const snap = await getDoc(doc(db, "animeDetails", anime.id));
-             if (snap.exists()) {
-               docFound = { id: snap.id, data: snap.data(), collection: "animeDetails" };
-               console.log("✅ Document trouvé avec ID exact dans animeDetails");
-             }
-           } catch (e) {
-             console.log("❌ Erreur avec ID exact:", e.message);
-           }
-         }
-        
-        // Si pas trouvé, essayer avec les variantes de titre
-        if (!docFound) {
-          docFound = await tryFetchFromFirestore(titleVariants.length ? titleVariants : [title]);
+          if (hasUrls) {
+            setSeasons(seasonsArr);
+            setEpisodes(flat);
+            const idxS1 = seasonsArr.findIndex(s => /^saison\s*1/i.test(s.season));
+            if (idxS1 >= 0) setSelectedSeason(seasonsArr[idxS1].season);
+            setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
+            setLoading(false);
+            return;
+          }
         }
-        
-                 // Si toujours pas trouvé, essayer avec des variantes d'ID dans animeDetails
-         if (!docFound && anime.id) {
-           console.log("🔍 Tentative avec variantes d'ID dans animeDetails...");
-           const idVariants = [
-             anime.id,
-             anime.id.replace(/-/g, ""),
-             anime.id.toLowerCase(),
-             anime.id.replace(/-/g, "").toLowerCase(),
-             normalizeTitleForSeasonKey(anime.title),
-             normalizeTitleForSeasonKey(anime.title).replace(/-/g, "")
-           ];
-           
-           for (const idVariant of idVariants) {
-             try {
-               const snap = await getDoc(doc(db, "animeDetails", idVariant));
-               if (snap.exists()) {
-                 docFound = { id: snap.id, data: snap.data(), collection: "animeDetails" };
-                 console.log("✅ Document trouvé avec variante d'ID:", idVariant);
-                 break;
-               }
-             } catch (e) {
-               continue;
-             }
-           }
-         }
-       
 
+        if (typeof providerRes === "object" && providerRes.grouped && Array.isArray(providerRes.grouped)) {
+          seasonsArr = providerRes.grouped.map((g) => ({
+            season: g.season || g.title || g.name || "Saison",
+            episodes: (g.episodes || []).map((e, idx) => ({
+              id: e.id ?? `${g.season}-${idx}`,
+              number: e.number ?? e.index ?? idx + 1,
+              title: e.name ?? e.title ?? `Épisode ${idx + 1}`,
+              languages: normalizeEpisodeLanguages(e),
+              date: e.date ?? e.release_date ?? null,
+              thumbnail: e.thumbnail,
+            })),
+          }));
+          
+          flat = seasonsArr.flatMap((g) => g.episodes || []);
+          setSeasons(seasonsArr);
+          setEpisodes(flat);
+          if (seasonsArr.length > 0) setSelectedSeason(seasonsArr[0].season);
+          setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
+          setLoading(false);
+          return;
+        }
+      }
 
-             // 3️⃣ Fallback Firestore (si pas déjà fait)
-       console.log("🔄 Tentative Firestore (fallback)...");
-       const titleVariantsFallback = [
-         anime.title,
-         anime.title_en,
-         anime.title_romaji,
-         ...(anime.title_variants || []),
-       ].filter(Boolean);
-       
-       console.log("🔍 Variantes de titre (fallback):", titleVariantsFallback);
-       const docFoundFallback = await tryFetchFromFirestore(titleVariantsFallback.length ? titleVariantsFallback : [title]);
-      
-      console.log("📄 Document Firestore trouvé:", docFound ? {
+      // 2️⃣ Fallback Firestore
+      console.log("🔄 V2 Fallback vers Firestore...");
+      const titleVariants = [
+        anime.title,
+        anime.title_en,
+        anime.title_romaji,
+        ...(anime.title_variants || []),
+      ].filter(Boolean);
+
+      console.log("🔍 V2 Variantes de titre:", titleVariants);
+
+      let docFound = null;
+      if (anime.id) {
+        console.log("🔍 V2 Tentative avec ID exact:", anime.id);
+        try {
+          const snap = await getDoc(doc(db, "animeDetails", anime.id));
+          if (snap.exists()) {
+            docFound = { id: snap.id, data: snap.data(), collection: "animeDetails" };
+            console.log("✅ V2 Document trouvé avec ID exact dans animeDetails");
+          }
+        } catch (e) {
+          console.log("❌ V2 Erreur avec ID exact:", e.message);
+        }
+      }
+
+      if (!docFound) {
+        docFound = await tryFetchFromFirestore(titleVariants.length ? titleVariants : [title]);
+      }
+
+      console.log("📄 V2 Document Firestore trouvé:", docFound ? {
         id: docFound.id,
         collection: docFound.collection,
         hasData: !!docFound.data,
         dataKeys: docFound.data ? Object.keys(docFound.data) : []
       } : "Aucun document");
-      
+
       if (docFound && docFound.data) {
-        console.log("📊 Données Firestore brutes:", docFound.data);
+        console.log("📊 V2 Données Firestore brutes:", docFound.data);
         const parsed = parseDocDataToSeasons(docFound.data, title);
-        console.log("🔧 Données parsées:", {
+        
+        console.log("🔧 V2 Données parsées:", {
           seasonsCount: parsed.seasons.length,
           episodesCount: parsed.flat.length,
           firstEpisode: parsed.flat[0] ? {
@@ -673,7 +641,7 @@ export default function AnimeDetailsScreen() {
             hasUrls: Object.keys(parsed.flat[0].languages || {}).length > 0
           } : null
         });
-        
+
         if (parsed.seasons.length) {
           parsed.flat.forEach(ep => {
             if (!ep.languages) ep.languages = {};
@@ -692,9 +660,9 @@ export default function AnimeDetailsScreen() {
       setSeasons([]);
       setEpisodes([]);
       setAnimeData(anime);
-      
+
     } catch (error) {
-      console.error('Erreur chargement anime:', error);
+      console.error('V2 Erreur chargement anime:', error);
       Alert.alert(
         'Erreur de chargement',
         'Impossible de charger les informations de l\'anime. Réessayer ?',
@@ -708,18 +676,18 @@ export default function AnimeDetailsScreen() {
       setRefreshing(false);
     }
   }, [anime, title]);
-  
+
   // ===============================
-  // 🎥 FONCTION DE LECTURE
+  // 🎥 FONCTION DE LECTURE V2.0
   // ===============================
-  
+
   const onPlayEpisode = useCallback(async (episode) => {
     if (!episode) {
       Alert.alert("Erreur", "Épisode invalide");
       return;
     }
 
-    console.log("🎬 Tentative de lecture épisode:", {
+    console.log("🎬 V2 Tentative de lecture épisode:", {
       id: episode.id,
       title: episode.title,
       number: episode.number,
@@ -727,227 +695,205 @@ export default function AnimeDetailsScreen() {
       url: episode.url
     });
 
-         try {
-       setResolving(true);
-       setResolvingMsg("🔍 Préparation du stream...");
+    try {
+      setResolving(true);
+      setResolvingMsg("🔍 V2 Préparation du stream...");
 
-       // Vérifier si l'épisode a des URLs directes
-       console.log("🎯 Épisode à lire:", {
-         id: episode.id,
-         languages: episode.languages,
-         hasUrls: Object.keys(episode.languages || {}).length > 0
-       });
+      // Vérifier si l'épisode a des URLs directes
+      console.log("🎯 V2 Épisode à lire:", {
+        id: episode.id,
+        languages: episode.languages,
+        hasUrls: Object.keys(episode.languages || {}).length > 0
+      });
 
-               // Essayer d'abord avec les URLs directes de l'épisode
-        let candidateUrl = pickBestUrlFromEpisode(episode, [selectedLanguage, "VOSTFR", "VF", "FR", "VO", "SUB", "DEFAULT"]);
-        
-        if (candidateUrl) {
-          console.log("✅ URL trouvée directement:", candidateUrl);
+      // Essayer d'abord avec les URLs directes de l'épisode
+      let candidateUrl = pickBestUrlFromEpisode(episode, [selectedLanguage, "VOSTFR", "VF", "FR", "VO", "SUB", "DEFAULT"]);
+      
+      if (candidateUrl) {
+        console.log("✅ V2 URL trouvée directement:", candidateUrl);
+
+        // Si c'est une URL directe, l'utiliser directement
+        if (VideoExtractorV5.isDirectVideo(candidateUrl)) {
+          setResolving(false);
+          setResolvingMsg("");
           
-          // Si c'est une URL directe, l'utiliser directement
-          if (VideoExtractor.isDirectVideo(candidateUrl)) {
-            setResolving(false);
-            setResolvingMsg("");
-            navigation.navigate("Player", { 
-              episode: { 
-                ...episode, 
-                url: candidateUrl,
-                originalUrl: candidateUrl,
-                anime: anime
-              } 
-            });
-            return;
-          }
-          
-          // Sinon, extraire avec le backend
-          console.log("🔧 Extraction nécessaire pour:", candidateUrl);
-          
-                     // Essayer plusieurs URLs si la première échoue
-           const allUrls = [];
-           const normalized = normalizeEpisodeLanguages(episode);
-           for (const lang of Object.keys(normalized)) {
-             allUrls.push(...normalized[lang]);
-           }
-           
-           // Filtrer les URLs invalides
-           const validUrls = allUrls.filter(url => {
-             if (!url || typeof url !== 'string') return false;
-             
-             // Rejeter les URLs publicitaires et de redirection
-             const invalidPatterns = [
-               /^intent:\/\//i,
-               /ak\.amskiploomr\.com/i,
-               /doubleclick\.net/i,
-               /googlesyndication\.com/i,
-               /adservice\.google\.com/i,
-               /ads\./i,
-               /tracker\./i,
-               /analytics\./i,
-               /pixel\./i,
-               /beacon\./i
-             ];
-             
-             return !invalidPatterns.some(pattern => pattern.test(url));
-           });
-           
-           console.log("🔍 URLs valides trouvées:", validUrls.length, "sur", allUrls.length);
-           
-           for (const url of validUrls) {
-             try {
-               console.log("🔄 Tentative extraction avec:", url);
-               const directUrl = await VideoExtractor.extractVideoUrl(url);
-               
-               setResolving(false);
-               setResolvingMsg("");
-               navigation.navigate("Player", { 
-                 episode: { 
-                   ...episode, 
-                   url: directUrl,
-                   originalUrl: url,
-                   anime: anime
-                 } 
-               });
-               return;
-             } catch (error) {
-               console.log("❌ Échec avec", url, ":", error.message);
-               continue;
-             }
-           }
-          
-          throw new Error("Aucune URL n'a pu être extraite");
+          navigation.navigate("PlayerV2", { // Navigation vers PlayerV2
+            episode: {
+              ...episode,
+              url: candidateUrl,
+              originalUrl: candidateUrl,
+              anime: anime
+            }
+          });
+          return;
         }
 
-       // Fallback: essayer le nouveau backend
-       console.log("🔄 Tentative avec le nouveau backend...");
-       const requestBody = {
-         episodeId: episode.id,
-         language: selectedLanguage,
-         preferredQuality: '720p'
-       };
-       
-       console.log("📤 Requête vers backend:", {
-         url: `${NEW_BACKEND_URL}/api/stream/prepare`,
-         body: requestBody,
-         episodeLanguages: episode.languages
-       });
-       
-       const streamResponse = await fetch(`${NEW_BACKEND_URL}/api/stream/prepare`, {
-         method: 'POST',
-         headers: {
-           'Content-Type': 'application/json',
-         },
-         body: JSON.stringify(requestBody)
-       });
+        // Sinon, extraire avec VideoExtractor V5
+        console.log("🔧 V2 Extraction nécessaire avec VideoExtractor V5...");
+        setResolvingMsg("🔧 V2 Extraction en cours...");
 
-       if (!streamResponse.ok) {
-         const errorData = await streamResponse.json();
-         throw new Error(errorData.error || `HTTP ${streamResponse.status}`);
-       }
+        try {
+          const extractionResult = await VideoExtractorV5.extractVideoUrl(candidateUrl, {
+            preferMp4: true,
+            timeout: 60000,
+            format: 'best'
+          });
 
-       const streamData = await streamResponse.json();
-       console.log("📦 Données stream reçues:", streamData);
+          console.log("🎯 V2 Résultat extraction V5:", {
+            success: !!extractionResult.url,
+            type: extractionResult.type,
+            quality: extractionResult.quality,
+            version: extractionResult.version,
+            extractor: extractionResult.extractor
+          });
 
-       if (!streamData.success || !streamData.stream) {
-         throw new Error("Aucun stream disponible");
-       }
+          if (extractionResult && extractionResult.url) {
+            setResolving(false);
+            setResolvingMsg("");
 
-       const stream = streamData.stream;
-       console.log("✅ Stream préparé:", stream);
+            navigation.navigate("PlayerV2", { // Navigation vers PlayerV2
+              episode: {
+                ...episode,
+                url: extractionResult.url,
+                originalUrl: candidateUrl,
+                anime: anime,
+                streamHeaders: extractionResult.headers || {},
+                streamQuality: extractionResult.quality,
+                extractorVersion: extractionResult.version,
+                extractorUsed: extractionResult.extractor
+              }
+            });
+            return;
+          } else {
+            throw new Error('VideoExtractor V5 returned no URL');
+          }
 
-       setResolving(false);
-       setResolvingMsg("");
+        } catch (extractError) {
+          console.error("❌ V2 Erreur extraction V5:", extractError);
+          setResolvingMsg("⚠️ V2 Fallback vers autres sources...");
 
-       // Navigation vers le Player avec les données du stream
-       navigation.navigate("Player", { 
-         episode: { 
-           ...episode, 
-           url: stream.url,
-           originalUrl: stream.url,
-           anime: anime,
-           streamHeaders: stream.headers || {},
-           streamQuality: stream.quality,
-           sessionToken: streamData.session
-         } 
-       });
+          // Fallback: essayer les autres URLs disponibles
+          const allUrls = [];
+          const normalized = normalizeEpisodeLanguages(episode);
+          
+          for (const lang of Object.keys(normalized)) {
+            allUrls.push(...normalized[lang]);
+          }
+
+          // Filtrer les URLs valides
+          const validUrls = allUrls.filter(url => {
+            if (!url || typeof url !== 'string') return false;
+            const invalidPatterns = [
+              /^intent:\/\//i,
+              /ak\.amskiploomr\.com/i,
+              /doubleclick\.net/i,
+              /ads\./i,
+              /tracker\./i
+            ];
+            return !invalidPatterns.some(pattern => pattern.test(url));
+          });
+
+          console.log("🔍 V2 URLs alternatives trouvées:", validUrls.length);
+
+          // Essayer les URLs alternatives une par une
+          for (let i = 0; i < validUrls.length; i++) {
+            const altUrl = validUrls[i];
+            try {
+              console.log(`🔄 V2 Tentative URL alternative ${i + 1}/${validUrls.length}: ${altUrl.slice(0, 50)}...`);
+              setResolvingMsg(`🔄 V2 Test source ${i + 1}/${validUrls.length}...`);
+
+              if (VideoExtractorV5.isDirectVideo(altUrl)) {
+                // URL directe
+                setResolving(false);
+                setResolvingMsg("");
+                
+                navigation.navigate("PlayerV2", {
+                  episode: {
+                    ...episode,
+                    url: altUrl,
+                    originalUrl: altUrl,
+                    anime: anime
+                  }
+                });
+                return;
+              } else {
+                // Essayer extraction
+                const altResult = await VideoExtractorV5.extractVideoUrl(altUrl, {
+                  preferMp4: true,
+                  timeout: 30000 // Timeout plus court pour alternatives
+                });
+
+                if (altResult && altResult.url) {
+                  setResolving(false);
+                  setResolvingMsg("");
+                  
+                  navigation.navigate("PlayerV2", {
+                    episode: {
+                      ...episode,
+                      url: altResult.url,
+                      originalUrl: altUrl,
+                      anime: anime,
+                      streamHeaders: altResult.headers || {}
+                    }
+                  });
+                  return;
+                }
+              }
+            } catch (altError) {
+              console.warn(`❌ V2 URL alternative ${i + 1} échouée:`, altError.message);
+              continue;
+            }
+          }
+
+          // Aucune alternative n'a fonctionné
+          throw new Error(`Extraction failed for all ${validUrls.length} available sources`);
+        }
+      }
+
+      // Aucune URL trouvée
+      throw new Error("Aucun lien vidéo trouvé pour cet épisode");
 
     } catch (err) {
       setResolving(false);
       setResolvingMsg("");
-      console.error("💥 Erreur critique lecture:", err);
-      
-      // Fallback vers l'ancienne méthode si le nouveau backend échoue
-      console.log("🔄 Tentative avec l'ancien backend...");
-      
-      try {
-        let candidateUrl = pickBestUrlFromEpisode(episode, [selectedLanguage, "VOSTFR", "VF", "FR", "VO", "SUB", "DEFAULT"]);
-        
-        if (!candidateUrl) {
-          const candidates = [];
-          if (episode.languages && typeof episode.languages === 'object') {
-            for (const k of Object.keys(episode.languages)) {
-              const arr = episode.languages[k];
-              if (Array.isArray(arr)) {
-                candidates.push(...arr.filter(Boolean).map(String));
-              }
+      console.error("💥 V2 Erreur critique lecture:", err);
+
+      Alert.alert(
+        "💥 Erreur de lecture",
+        `Impossible de lire l'épisode:\n\n${err.message}\n\nVeuillez réessayer ou choisir un autre épisode.`,
+        [
+          { text: 'OK', style: 'default' },
+          { 
+            text: 'Test Backend', 
+            onPress: async () => {
+              const backendStatus = await VideoExtractorV5.testBackendConnectivity();
+              Alert.alert(
+                'Status Backend V6',
+                `Statut: ${backendStatus.success ? '✅ OK' : '❌ Erreur'}\n` +
+                `Message: ${backendStatus.message}\n` +
+                `Version: ${backendStatus.version || 'N/A'}`
+              );
             }
           }
-          if (candidates.length > 0) {
-            candidateUrl = candidates[0];
-          }
-        }
-
-        if (!candidateUrl) {
-          Alert.alert(
-            "❌ Aucun lien trouvé", 
-            "Aucun lien vidéo valide n'a été trouvé pour cet épisode."
-          );
-          return;
-        }
-
-        // Test avec l'ancien backend
-        if (VideoExtractor.isDirectVideo(candidateUrl)) {
-          navigation.navigate("Player", { 
-            episode: { 
-              ...episode, 
-              url: candidateUrl,
-              originalUrl: candidateUrl,
-              anime: anime
-            } 
-          });
-        } else {
-          const directUrl = await VideoExtractor.extractVideoUrl(candidateUrl);
-          navigation.navigate("Player", { 
-            episode: { 
-              ...episode, 
-              url: directUrl,
-              originalUrl: candidateUrl,
-              anime: anime
-            } 
-          });
-        }
-      } catch (fallbackError) {
-        Alert.alert(
-          "💥 Erreur critique", 
-          `Impossible de lire l'épisode:\n${err.message}\n\nErreur fallback: ${fallbackError.message}`
-        );
-      }
+        ]
+      );
     }
   }, [navigation, anime, selectedLanguage]);
-  
+
   // ===============================
   // 🔄 EFFETS
   // ===============================
-  
+
   useEffect(() => {
     loadAnimeData();
   }, [loadAnimeData]);
-  
+
   // Épisodes filtrés par saison
   const filteredEpisodes = useMemo(() => {
     const season = seasons.find(s => s.season === selectedSeason);
     return season ? season.episodes : [];
   }, [seasons, selectedSeason]);
-  
+
   // Langues disponibles
   const availableLanguages = useMemo(() => {
     const languages = new Set();
@@ -958,64 +904,59 @@ export default function AnimeDetailsScreen() {
     });
     return Array.from(languages);
   }, [episodes]);
-  
+
   // ===============================
   // 🎨 COMPOSANTS DE RENDU
   // ===============================
-  
+
   const renderHeader = () => (
-    <Animated.View style={[styles.header, { opacity: headerOpacity }]}>
-      <BlurView intensity={80} style={StyleSheet.absoluteFill} />
-      <SafeAreaView>
-        <View style={styles.headerContent}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+    <Animated.View style={[styles.header, { backgroundColor: headerOpacity.interpolate({ inputRange: [0, 1], outputRange: ['transparent', COLORS.background] }) }]}>
+      <View style={styles.headerContent}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
+          <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+        <View style={styles.headerActions}>
+          <TouchableOpacity>
+            <Ionicons name="share-outline" size={24} color={COLORS.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {title}
-          </Text>
-          <View style={styles.headerActions}>
-            <TouchableOpacity>
-              <Ionicons name="cast" size={24} color={COLORS.text} />
-            </TouchableOpacity>
-            <TouchableOpacity>
-              <Ionicons name="ellipsis-vertical" size={24} color={COLORS.text} />
-            </TouchableOpacity>
-          </View>
         </View>
-      </SafeAreaView>
+      </View>
     </Animated.View>
   );
-  
+
   const renderHeroSection = () => (
     <View style={styles.heroContainer}>
-      <Image source={{ uri: poster }} style={styles.heroPoster} />
+      <Image source={{ uri: poster }} style={styles.heroPoster} resizeMode="cover" />
+      
       <LinearGradient
         colors={['transparent', 'rgba(11,11,11,0.8)', COLORS.background]}
         style={styles.heroGradient}
       />
+      
       <View style={styles.heroContent}>
         <View style={styles.heroInfo}>
-          <Text style={styles.heroTitle}>{title}</Text>
+          <Text style={styles.heroTitle} numberOfLines={2}>{title}</Text>
+          
           <View style={styles.heroMeta}>
             <View style={styles.ratingBadge}>
               <Text style={styles.ratingText}>16+</Text>
             </View>
-            <Text style={styles.metaText}>•</Text>
             <Text style={styles.metaText}>Animation</Text>
-            <Text style={styles.metaText}>•</Text>
             <Text style={styles.metaText}>HD</Text>
           </View>
+
           <View style={styles.heroActions}>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.playButton}
               onPress={() => filteredEpisodes[0] && onPlayEpisode(filteredEpisodes[0])}
-              disabled={!filteredEpisodes.length}
+              disabled={!filteredEpisodes.length || resolving}
             >
               <Ionicons name="play" size={20} color={COLORS.background} />
               <Text style={styles.playButtonText}>LECTURE</Text>
             </TouchableOpacity>
-            <TouchableOpacity 
+
+            <TouchableOpacity
               style={[styles.actionButton, isInWatchlist && styles.actionButtonActive]}
               onPress={() => setIsInWatchlist(!isInWatchlist)}
             >
@@ -1033,20 +974,20 @@ export default function AnimeDetailsScreen() {
       </View>
     </View>
   );
-  
+
   const renderDescription = () => {
     const description = anime.description || "";
     const cleanDesc = description
-      .replace(/<br\s*\/?>(\n)?/gi, "\n")
+      .replace(/(\n)?/gi, "\n")
       .replace(/<[^>]*>/g, "")
       .trim();
-    
+
     if (!cleanDesc) return null;
-    
+
     return (
       <View style={styles.descriptionContainer}>
-        <Text 
-          style={styles.descriptionText}
+        <Text
+          style={[styles.descriptionText, expandedDescription ? {} : { maxHeight: 60 }]}
           numberOfLines={expandedDescription ? undefined : 3}
         >
           {cleanDesc}
@@ -1061,10 +1002,10 @@ export default function AnimeDetailsScreen() {
       </View>
     );
   };
-  
+
   const renderTabs = () => (
     <View style={styles.tabsContainer}>
-      <TouchableOpacity 
+      <TouchableOpacity
         style={[styles.tab, selectedTab === 'episodes' && styles.activeTab]}
         onPress={() => setSelectedTab('episodes')}
       >
@@ -1072,7 +1013,8 @@ export default function AnimeDetailsScreen() {
           ÉPISODES
         </Text>
       </TouchableOpacity>
-      <TouchableOpacity 
+
+      <TouchableOpacity
         style={[styles.tab, selectedTab === 'similar' && styles.activeTab]}
         onPress={() => setSelectedTab('similar')}
       >
@@ -1080,7 +1022,8 @@ export default function AnimeDetailsScreen() {
           SIMILAIRES
         </Text>
       </TouchableOpacity>
-      <TouchableOpacity 
+
+      <TouchableOpacity
         style={[styles.tab, selectedTab === 'details' && styles.activeTab]}
         onPress={() => setSelectedTab('details')}
       >
@@ -1090,10 +1033,10 @@ export default function AnimeDetailsScreen() {
       </TouchableOpacity>
     </View>
   );
-  
+
   const renderSeasonSelector = () => {
     if (seasons.length <= 1) return null;
-    
+
     return (
       <View style={styles.seasonSelector}>
         <Text style={styles.sectionTitle}>Saison</Text>
@@ -1119,10 +1062,10 @@ export default function AnimeDetailsScreen() {
       </View>
     );
   };
-  
+
   const renderLanguageSelector = () => {
     if (availableLanguages.length <= 1) return null;
-    
+
     return (
       <View style={styles.languageSelector}>
         <Text style={styles.sectionTitle}>Langue</Text>
@@ -1148,27 +1091,30 @@ export default function AnimeDetailsScreen() {
       </View>
     );
   };
-  
+
   const renderEpisodeItem = ({ item: episode, index }) => (
-    <TouchableOpacity 
+    <TouchableOpacity
       style={styles.episodeItem}
       onPress={() => onPlayEpisode(episode)}
       activeOpacity={0.7}
+      disabled={resolving}
     >
       <View style={styles.episodeThumb}>
-        <Image 
-          source={{ uri: episode.thumbnail || poster }} 
-          style={styles.episodeImage} 
+        <Image
+          source={{ uri: episode.thumbnail || poster }}
+          style={styles.episodeImage}
+          resizeMode="cover"
         />
         <View style={styles.playOverlay}>
-          <Ionicons name="play" size={16} color={COLORS.text} />
+          <Ionicons name="play-circle" size={40} color="rgba(255,255,255,0.8)" />
         </View>
         <View style={styles.episodeDuration}>
           <Text style={styles.durationText}>24m</Text>
         </View>
       </View>
+
       <View style={styles.episodeInfo}>
-        <Text style={styles.episodeTitle}>
+        <Text style={styles.episodeTitle} numberOfLines={2}>
           {episode.number}. {episode.title}
         </Text>
         <Text style={styles.episodeDescription} numberOfLines={2}>
@@ -1178,6 +1124,7 @@ export default function AnimeDetailsScreen() {
           {episode.date ? new Date(episode.date).toLocaleDateString('fr-FR') : ''}
         </Text>
       </View>
+
       <View style={styles.episodeActions}>
         <TouchableOpacity>
           <Ionicons name="download-outline" size={20} color={COLORS.textMuted} />
@@ -1185,63 +1132,48 @@ export default function AnimeDetailsScreen() {
       </View>
     </TouchableOpacity>
   );
-  
+
   const renderEpisodesList = () => (
     <View style={styles.episodesContainer}>
       {renderSeasonSelector()}
       {renderLanguageSelector()}
-      
+
       <View style={styles.episodesHeader}>
         <Text style={styles.sectionTitle}>
           {selectedSeason} ({filteredEpisodes.length} épisodes)
         </Text>
+        
         <View style={styles.headerActions}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.debugButton}
             onPress={async () => {
-              console.log("🔍 Debug - Épisodes chargés:", episodes.length);
-              console.log("🔍 Debug - Épisodes filtrés:", filteredEpisodes.length);
-              console.log("🔍 Debug - Premier épisode:", filteredEpisodes[0]);
+              console.log("🔍 V2 Debug - Épisodes chargés:", episodes.length);
+              console.log("🔍 V2 Debug - Épisodes filtrés:", filteredEpisodes.length);
+              console.log("🔍 V2 Debug - Premier épisode:", filteredEpisodes[0]);
               
-                             // Test du backend
-               const backendTest = await testBackendConnectivity();
-               console.log("🔍 Test backend:", backendTest);
-               
-               const backendStatus = [];
-               if (backendTest.new.success) {
-                 backendStatus.push("🟢 Nouveau: OK");
-               } else {
-                 backendStatus.push(`🔴 Nouveau: ${backendTest.new.error || 'Erreur'}`);
-               }
-               
-               if (backendTest.legacy.success) {
-                 backendStatus.push("🟢 Legacy: OK");
-               } else {
-                 backendStatus.push(`🔴 Legacy: ${backendTest.legacy.error || 'Erreur'}`);
-               }
-               
-               Alert.alert(
-                 "Debug Info", 
-                 `Épisodes chargés: ${episodes.length}\n` +
-                 `Épisodes filtrés: ${filteredEpisodes.length}\n\n` +
-                 `Backends:\n${backendStatus.join('\n')}\n\n` +
-                 `Message: ${backendTest.message}`
-               );
+              // Test du backend V6
+              const backendTest = await VideoExtractorV5.testBackendConnectivity();
+              console.log("🔍 V2 Test backend:", backendTest);
+              
+              Alert.alert(
+                "Debug Info V2",
+                `Épisodes chargés: ${episodes.length}\n` +
+                `Épisodes filtrés: ${filteredEpisodes.length}\n\n` +
+                `Backend V6: ${backendTest.success ? '✅ OK' : '❌ Erreur'}\n` +
+                `Version: ${backendTest.version || 'N/A'}\n` +
+                `Message: ${backendTest.message}`
+              );
             }}
           >
-            <Ionicons name="bug" size={16} color={COLORS.background} />
-            <Text style={styles.debugButtonText}>Debug</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.downloadAllButton}>
-            <Ionicons name="download" size={16} color={COLORS.background} />
-            <Text style={styles.downloadAllText}>Tout télécharger</Text>
+            <MaterialIcons name="bug-report" size={12} color={COLORS.background} />
+            <Text style={styles.debugButtonText}>Debug V2</Text>
           </TouchableOpacity>
         </View>
       </View>
-      
+
       {filteredEpisodes.length === 0 ? (
         <View style={styles.emptyState}>
-          <Ionicons name="film-outline" size={48} color={COLORS.textMuted} />
+          <MaterialIcons name="video-library" size={48} color={COLORS.textMuted} />
           <Text style={styles.emptyStateText}>Aucun épisode trouvé</Text>
           <Text style={styles.emptyStateSubtext}>
             Vérifiez votre connexion ou réessayez plus tard
@@ -1258,23 +1190,21 @@ export default function AnimeDetailsScreen() {
       )}
     </View>
   );
-  
+
   const renderSimilarContent = () => (
     <View style={styles.similarContainer}>
       <Text style={styles.sectionTitle}>Titres similaires</Text>
       <View style={styles.similarGrid}>
         {Array.from({ length: 6 }, (_, i) => (
           <TouchableOpacity key={i} style={styles.similarItem}>
-            <Image source={{ uri: poster }} style={styles.similarPoster} />
-            <Text style={styles.similarTitle} numberOfLines={2}>
-              Anime similaire {i + 1}
-            </Text>
+            <View style={styles.similarPoster} />
+            <Text style={styles.similarTitle}>Anime similaire {i + 1}</Text>
           </TouchableOpacity>
         ))}
       </View>
     </View>
   );
-  
+
   const renderDetailsContent = () => (
     <View style={styles.detailsContainer}>
       <Text style={styles.sectionTitle}>Informations</Text>
@@ -1283,16 +1213,19 @@ export default function AnimeDetailsScreen() {
           <Text style={styles.detailLabel}>Créateur</Text>
           <Text style={styles.detailValue}>{anime.studio || "—"}</Text>
         </View>
+
         <View style={styles.detailItem}>
           <Text style={styles.detailLabel}>Genre</Text>
           <Text style={styles.detailValue}>
             {Array.isArray(anime.genres) ? anime.genres.join(", ") : "Animation"}
           </Text>
         </View>
+
         <View style={styles.detailItem}>
           <Text style={styles.detailLabel}>Année</Text>
           <Text style={styles.detailValue}>{anime.year || "—"}</Text>
         </View>
+
         <View style={styles.detailItem}>
           <Text style={styles.detailLabel}>Statut</Text>
           <Text style={styles.detailValue}>{anime.status || "—"}</Text>
@@ -1300,7 +1233,7 @@ export default function AnimeDetailsScreen() {
       </View>
     </View>
   );
-  
+
   const renderContent = () => {
     switch (selectedTab) {
       case 'episodes':
@@ -1313,54 +1246,54 @@ export default function AnimeDetailsScreen() {
         return renderEpisodesList();
     }
   };
-  
+
   // ===============================
   // 🎨 RENDU PRINCIPAL
   // ===============================
-  
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <StatusBar barStyle="light-content" backgroundColor={COLORS.background} />
         <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Chargement...</Text>
+        <Text style={styles.loadingText}>Chargement V2...</Text>
       </View>
     );
   }
-  
+
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.background} />
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       
       <Animated.ScrollView
+        style={styles.scrollView}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: false }
         )}
         scrollEventThrottle={16}
-        style={styles.scrollView}
-        showsVerticalScrollIndicator={false}
-        refreshing={refreshing}
-        onRefresh={loadAnimeData}
       >
         {renderHeroSection()}
         {renderDescription()}
         {renderTabs()}
         {renderContent()}
       </Animated.ScrollView>
-      
+
       {renderHeader()}
-      
-      {/* Overlay de chargement */}
+
+      {/* Overlay de chargement V2 */}
       {resolving && (
         <View style={styles.resolvingOverlay}>
-          <BlurView intensity={50} style={StyleSheet.absoluteFill} />
-          <View style={styles.resolvingContent}>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.resolvingText}>
-              {resolvingMsg || "Préparation..."}
-            </Text>
-          </View>
+          <BlurView intensity={20} style={styles.resolvingBlur}>
+            <View style={styles.resolvingContent}>
+              <ActivityIndicator size="large" color={COLORS.primary} />
+              <Text style={styles.resolvingText}>
+                {resolvingMsg || "Préparation V2..."}
+              </Text>
+              <Text style={styles.resolvingSubtext}>
+                Utilisation VideoExtractor V5 + Backend V6
+              </Text>
+            </View>
+          </BlurView>
         </View>
       )}
     </View>
@@ -1400,7 +1333,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     zIndex: 10,
-    backgroundColor: 'transparent',
+    paddingTop: Platform.OS === 'ios' ? 44 : StatusBar.currentHeight || 0,
   },
   
   headerContent: {
@@ -1422,18 +1355,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 16,
   },
-  
+
   heroContainer: {
     height: SCREEN_HEIGHT * 0.6,
     position: 'relative',
   },
-  
+
   heroPoster: {
     width: '100%',
     height: '100%',
     resizeMode: 'cover',
   },
-  
+
   heroGradient: {
     position: 'absolute',
     bottom: 0,
@@ -1441,7 +1374,7 @@ const styles = StyleSheet.create({
     right: 0,
     height: '60%',
   },
-  
+
   heroContent: {
     position: 'absolute',
     bottom: 0,
@@ -1449,11 +1382,11 @@ const styles = StyleSheet.create({
     right: 0,
     padding: 20,
   },
-  
+
   heroInfo: {
     alignItems: 'center',
   },
-  
+
   heroTitle: {
     color: COLORS.text,
     fontSize: 28,
@@ -1464,38 +1397,38 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 8,
   },
-  
+
   heroMeta: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 20,
     gap: 8,
   },
-  
+
   ratingBadge: {
     backgroundColor: COLORS.surface,
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 4,
   },
-  
+
   ratingText: {
     color: COLORS.text,
     fontSize: 12,
     fontWeight: '600',
   },
-  
+
   metaText: {
     color: COLORS.textSecondary,
     fontSize: 14,
   },
-  
+
   heroActions: {
     flexDirection: 'row',
     gap: 12,
     width: '100%',
   },
-  
+
   playButton: {
     flex: 1,
     backgroundColor: COLORS.primary,
@@ -1507,13 +1440,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
-  
+
   playButtonText: {
     color: COLORS.background,
     fontSize: 16,
     fontWeight: '700',
   },
-  
+
   actionButton: {
     flex: 1,
     backgroundColor: 'transparent',
@@ -1527,33 +1460,33 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
-  
+
   actionButtonActive: {
     borderColor: COLORS.success,
     backgroundColor: 'rgba(76, 175, 80, 0.1)',
   },
-  
+
   actionButtonText: {
     color: COLORS.text,
     fontSize: 16,
     fontWeight: '700',
   },
-  
+
   actionButtonTextActive: {
     color: COLORS.success,
   },
-  
+
   descriptionContainer: {
     padding: 20,
   },
-  
+
   descriptionText: {
     color: COLORS.textSecondary,
     fontSize: 14,
     lineHeight: 20,
     textAlign: 'center',
   },
-  
+
   expandButton: {
     color: COLORS.primary,
     fontSize: 14,
@@ -1561,13 +1494,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 8,
   },
-  
+
   tabsContainer: {
     flexDirection: 'row',
     paddingHorizontal: 20,
     marginBottom: 20,
   },
-  
+
   tab: {
     flex: 1,
     paddingVertical: 12,
@@ -1575,33 +1508,33 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2,
     borderBottomColor: 'transparent',
   },
-  
+
   activeTab: {
     borderBottomColor: COLORS.primary,
   },
-  
+
   tabText: {
     color: COLORS.textMuted,
     fontSize: 14,
     fontWeight: '600',
   },
-  
+
   activeTabText: {
     color: COLORS.primary,
   },
-  
+
   sectionTitle: {
     color: COLORS.text,
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 16,
   },
-  
+
   seasonSelector: {
     marginBottom: 20,
     paddingHorizontal: 20,
   },
-  
+
   seasonChip: {
     backgroundColor: COLORS.surface,
     paddingHorizontal: 16,
@@ -1609,26 +1542,26 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginRight: 12,
   },
-  
+
   selectedSeasonChip: {
     backgroundColor: COLORS.primary,
   },
-  
+
   seasonChipText: {
     color: COLORS.textSecondary,
     fontSize: 14,
     fontWeight: '600',
   },
-  
+
   selectedSeasonChipText: {
     color: COLORS.background,
   },
-  
+
   languageSelector: {
     marginBottom: 20,
     paddingHorizontal: 20,
   },
-  
+
   languageChip: {
     backgroundColor: COLORS.surface,
     paddingHorizontal: 16,
@@ -1636,25 +1569,25 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginRight: 12,
   },
-  
+
   selectedLanguageChip: {
     backgroundColor: COLORS.primary,
   },
-  
+
   languageChipText: {
     color: COLORS.textSecondary,
     fontSize: 14,
     fontWeight: '600',
   },
-  
+
   selectedLanguageChipText: {
     color: COLORS.background,
   },
-  
+
   episodesContainer: {
     paddingBottom: 100,
   },
-  
+
   episodesHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1662,12 +1595,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     marginBottom: 16,
   },
-  
-  headerActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  
+
   debugButton: {
     backgroundColor: '#FF6B6B',
     paddingHorizontal: 12,
@@ -1677,36 +1605,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
   },
-  
+
   debugButtonText: {
     color: COLORS.background,
     fontSize: 12,
     fontWeight: '600',
   },
-  
-  downloadAllButton: {
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  
-  downloadAllText: {
-    color: COLORS.background,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  
+
   episodeItem: {
     flexDirection: 'row',
     paddingHorizontal: 20,
     paddingVertical: 12,
     alignItems: 'center',
   },
-  
+
   episodeThumb: {
     width: 140,
     height: 80,
@@ -1715,13 +1627,13 @@ const styles = StyleSheet.create({
     position: 'relative',
     backgroundColor: COLORS.surface,
   },
-  
+
   episodeImage: {
     width: '100%',
     height: '100%',
     resizeMode: 'cover',
   },
-  
+
   playOverlay: {
     position: 'absolute',
     top: 0,
@@ -1732,7 +1644,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  
+
   episodeDuration: {
     position: 'absolute',
     bottom: 8,
@@ -1742,77 +1654,77 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 4,
   },
-  
+
   durationText: {
     color: COLORS.text,
     fontSize: 10,
     fontWeight: '600',
   },
-  
+
   episodeInfo: {
     flex: 1,
     paddingHorizontal: 16,
   },
-  
+
   episodeTitle: {
     color: COLORS.text,
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 4,
   },
-  
+
   episodeDescription: {
     color: COLORS.textSecondary,
     fontSize: 12,
     lineHeight: 16,
     marginBottom: 4,
   },
-  
+
   episodeDate: {
     color: COLORS.textMuted,
     fontSize: 10,
   },
-  
+
   episodeActions: {
     paddingLeft: 16,
   },
-  
+
   emptyState: {
     alignItems: 'center',
     paddingVertical: 40,
   },
-  
+
   emptyStateText: {
     color: COLORS.textSecondary,
     fontSize: 16,
     fontWeight: '600',
     marginTop: 16,
   },
-  
+
   emptyStateSubtext: {
     color: COLORS.textMuted,
     fontSize: 14,
     marginTop: 8,
     textAlign: 'center',
   },
-  
+
   similarContainer: {
     paddingHorizontal: 20,
     paddingBottom: 100,
   },
-  
+
   similarGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 16,
     justifyContent: 'space-between',
   },
-  
+
   similarItem: {
     width: (SCREEN_WIDTH - 56) / 2,
     marginBottom: 16,
   },
-  
+
   similarPoster: {
     width: '100%',
     aspectRatio: 2 / 3,
@@ -1820,40 +1732,40 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     marginBottom: 8,
   },
-  
+
   similarTitle: {
     color: COLORS.text,
     fontSize: 14,
     fontWeight: '600',
   },
-  
+
   detailsContainer: {
     paddingHorizontal: 20,
     paddingBottom: 100,
   },
-  
+
   detailsGrid: {
     gap: 16,
   },
-  
+
   detailItem: {
     backgroundColor: COLORS.surface,
     padding: 16,
     borderRadius: 8,
   },
-  
+
   detailLabel: {
     color: COLORS.textMuted,
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 4,
   },
-  
+
   detailValue: {
     color: COLORS.text,
     fontSize: 16,
   },
-  
+
   resolvingOverlay: {
     position: 'absolute',
     top: 0,
@@ -1864,19 +1776,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 20,
   },
-  
+
+  resolvingBlur: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   resolvingContent: {
     backgroundColor: COLORS.surface,
     padding: 32,
     borderRadius: 16,
     alignItems: 'center',
     marginHorizontal: 40,
+    maxWidth: 300,
   },
-  
+
   resolvingText: {
     color: COLORS.text,
     fontSize: 14,
     marginTop: 16,
+    textAlign: 'center',
+  },
+
+  resolvingSubtext: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    marginTop: 8,
     textAlign: 'center',
   },
 });

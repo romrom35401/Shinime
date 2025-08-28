@@ -1,8 +1,6 @@
-// Player.js
-// Lecteur hybride : utilise expo-av Video pour les fichiers directs (mp4, m3u8)
-// et WebView pour les pages d'embed (vk, sendvid, sibnet, youtube...).
-// Le lecteur attend `route.params.episode` au format produit par AnimeDetailsScreen.js
-// episode = { showTitle, number, season, url, languages: { VOSTFR: [url1,url2], VF: [...] } }
+// Player.js V2.0 - Compatible expo-video + VideoExtractor V5
+// Migration depuis expo-av vers expo-video (recommandé)
+// Support amélioré pour WebView + gestion d'erreurs robuste
 
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import {
@@ -11,21 +9,22 @@ import {
   Text,
   StyleSheet,
   Platform,
-  Pressable,
   ActivityIndicator,
   Alert,
   Linking,
   Dimensions,
+  SafeAreaView,
 } from "react-native";
-import { Video } from "expo-av";
+import { VideoPlayer, useVideoPlayer } from 'expo-video'; // Nouveau: expo-video
+import { useEvent } from 'expo';
 import { useRoute, useNavigation } from "@react-navigation/native";
 import { StatusBar } from "expo-status-bar";
 import * as ScreenOrientation from "expo-screen-orientation";
 import * as NavigationBar from "expo-navigation-bar";
 import Slider from "@react-native-community/slider";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialCommunityIcons, MaterialIcons } from "@expo/vector-icons";
 import { WebView } from "react-native-webview";
+import { VideoExtractorV5 } from "../api/VideoExtractorV5"; // Import du nouveau extractor
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -39,36 +38,42 @@ const COLORS = {
   thumb: "#F07C2E",
 };
 
-// ------------ Helpers pour détecter le type d'URL ------------
+// ============================================================
+// 🛠️ HELPERS POUR DÉTECTER LES TYPES D'URL
+// ============================================================
+
 function isDirectMediaUrl(u = "") {
   if (!u) return false;
-  return /\.(mp4|m3u8|webm)(\?|$)/i.test(String(u));
+  return /\.(mp4|m3u8|webm|mkv|avi|mov)(\?|$|#)/i.test(String(u));
 }
+
 function isEmbedHost(u = "") {
   if (!u) return false;
   const s = String(u).toLowerCase();
-  return /vk\.com\/video_ext|sendvid\.com|video\.sibnet\.ru|myvi\.tv|streamable\.com|youtube\.com|youtu\.be|dailymotion\.com|ok\.ru/.test(s) || /\/embed\//.test(s);
+  return /vk\.com\/video_ext|sendvid\.com|video\.sibnet\.ru|myvi\.tv|streamable\.com|youtube\.com|youtu\.be|dailymotion\.com|ok\.ru|vidmoly\./.test(s) || /\/embed\//.test(s);
 }
+
 function isLikelyWebView(u = "") {
   if (!u) return false;
   return isEmbedHost(u) && !isDirectMediaUrl(u);
 }
 
 function pickInitialUrlFromEpisode(ep = {}) {
-  // prefer episode.url if provided
+  // Priorité: episode.url d'abord
   if (ep?.url && typeof ep.url === "string") return ep.url;
 
-  // if languages provided, prefer VOSTFR -> VF -> FR -> DEFAULT
+  // Sinon chercher dans languages avec priorité VOSTFR -> VF -> FR -> DEFAULT
   const langs = ep?.languages || {};
   const order = ["VOSTFR", "VF", "FR", "VOST", "SUB", "DEFAULT"];
+  
   for (const k of order) {
     if (langs[k] && langs[k].length) {
-      // pick first non-empty
       const pick = langs[k].find(Boolean);
       if (pick) return pick;
     }
   }
-  // any language
+
+  // Chercher dans n'importe quelle langue
   const keys = Object.keys(langs || {});
   for (const kk of keys) {
     const arr = langs[kk];
@@ -78,116 +83,176 @@ function pickInitialUrlFromEpisode(ep = {}) {
   return null;
 }
 
-export default function Player() {
+// ============================================================
+// 🎬 COMPOSANT PLAYER V2.0
+// ============================================================
+
+export default function PlayerV2() {
   const navigation = useNavigation();
   const route = useRoute();
-
   const { episode = {}, anime = {}, onNext, onCast } = route.params || {};
 
-  const videoRef = useRef(null);
-  const webRef = useRef(null);
-
-  const [status, setStatus] = useState({});
+  // États principaux
   const [controlsVisible, setControlsVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [isWebViewMode, setIsWebViewMode] = useState(false);
   const [currentUrl, setCurrentUrl] = useState(() => pickInitialUrlFromEpisode(episode));
   const [streamHeaders, setStreamHeaders] = useState(episode?.streamHeaders || {});
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // États pour sélection langue/source
   const [currentLanguage, setCurrentLanguage] = useState(() => {
     const keys = episode?.languages ? Object.keys(episode.languages || {}) : [];
-    // prefer VOSTFR/VF
     if (keys.includes("VOSTFR")) return "VOSTFR";
     if (keys.includes("VF")) return "VF";
     return keys[0] || null;
   });
   const [currentSourceIndex, setCurrentSourceIndex] = useState(0);
-  const [pegiDynamic, setPegiDynamic] = useState(episode?.pegi || { rating: "12+", reasons: [] });
-  const [isBuffering, setIsBuffering] = useState(false);
-  const [videoKey, setVideoKey] = useState(0); // change to remount Video on url change
 
-  // Lock landscape on mount, unlock on unmount
+  // Nouveau: expo-video player
+  const player = useVideoPlayer(currentUrl, (player) => {
+    if (currentUrl && !isWebViewMode) {
+      console.log("🎬 Initialisation expo-video player V2 avec:", currentUrl.slice(0, 80));
+      
+      // Configuration du player
+      player.loop = false;
+      player.muted = false;
+      player.allowsExternalPlayback = true;
+      
+      // Headers si nécessaires (limité dans expo-video)
+      if (streamHeaders && Object.keys(streamHeaders).length > 0) {
+        console.log("📋 Headers détectés:", streamHeaders);
+        // expo-video gère les headers différemment
+        // On peut essayer via source object mais c'est limité
+      }
+    }
+  });
+
+  // Événements du player expo-video
+  const { isLoaded } = useEvent(player, 'statusChange');
+  const { currentTime, duration } = useEvent(player, 'timeUpdate');
+  const { error: playerError } = useEvent(player, 'error');
+
+  // ============================================================
+  // 🔄 EFFETS ET LIFECYCLE
+  // ============================================================
+
+  // Lock paysage au montage
   useEffect(() => {
     const enableFullscreen = async () => {
       await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
       if (Platform.OS === "android") await NavigationBar.setVisibilityAsync("hidden");
     };
+
     enableFullscreen();
+
     return () => {
       ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
       if (Platform.OS === "android") NavigationBar.setVisibilityAsync("visible");
     };
   }, []);
 
-  // infer mode when URL changes
+  // Détection du mode (Video native vs WebView)
   useEffect(() => {
     const url = currentUrl;
-    const web = isLikelyWebView(url);
-    setIsWebViewMode(!!web);
-    // if switching to video, remount
-    setVideoKey(k => k + 1);
+    console.log("🎬 Player V2 URL:", url);
+    console.log("📱 isDirectMediaUrl:", isDirectMediaUrl(url));
+    console.log("🌐 isEmbedHost:", isEmbedHost(url));
+    console.log("🔍 isLikelyWebView:", isLikelyWebView(url));
+
+    const shouldUseWebView = isLikelyWebView(url);
+    setIsWebViewMode(!!shouldUseWebView);
+    
+    console.log("📺 Mode V2 sélectionné:", shouldUseWebView ? "WebView" : "expo-video Native");
+
+    // Reset erreur quand URL change
+    setError(null);
   }, [currentUrl]);
 
-  // set initial url from episode.languages if not provided
+  // Auto-hide contrôles
+  useEffect(() => {
+    if (controlsVisible && player?.playing && !isWebViewMode && !showSettings) {
+      const timer = setTimeout(() => setControlsVisible(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [controlsVisible, player?.playing, isWebViewMode, showSettings]);
+
+  // URL initiale depuis épisode si manquante
   useEffect(() => {
     if (!currentUrl) {
       const pick = pickInitialUrlFromEpisode(episode);
-      setCurrentUrl(pick);
+      if (pick) {
+        console.log("🔄 V2 URL initiale récupérée:", pick.slice(0, 80));
+        setCurrentUrl(pick);
+      }
     }
   }, [episode]);
 
-  // auto-hide controls after 3s when playing (video mode)
+  // Gestion des erreurs du player
   useEffect(() => {
-    if (controlsVisible && status?.isPlaying && !isWebViewMode) {
-      const t = setTimeout(() => setControlsVisible(false), 3000);
-      return () => clearTimeout(t);
+    if (playerError) {
+      console.error("❌ Erreur expo-video player:", playerError);
+      setError(`Erreur de lecture: ${playerError.message || 'Inconnue'}`);
     }
-  }, [controlsVisible, status?.isPlaying, isWebViewMode]);
+  }, [playerError]);
 
-  // ---------- Playback controls ----------
+  // ============================================================
+  // 🎮 CONTRÔLES DE LECTURE
+  // ============================================================
+
   const toggleControls = () => setControlsVisible(v => !v);
 
-  const togglePlayPause = async () => {
-    if (isWebViewMode) return; // can't control remote embed reliably
-    if (!status?.isLoaded) return;
+  const togglePlayPause = () => {
+    if (isWebViewMode) return;
+    if (!isLoaded) return;
+
     try {
-      if (status.isPlaying) await videoRef.current?.pauseAsync();
-      else await videoRef.current?.playAsync();
-    } catch (e) {}
+      if (player.playing) {
+        player.pause();
+      } else {
+        player.play();
+      }
+    } catch (e) {
+      console.error("❌ Erreur toggle play/pause:", e);
+    }
   };
 
-  const skipMs = async (ms) => {
+  const seekTo = (timeInSeconds) => {
     if (isWebViewMode) return;
-    if (!status?.isLoaded) return;
+    if (!isLoaded) return;
+
     try {
-      let next = (status.positionMillis || 0) + ms;
-      if (next < 0) next = 0;
-      const dur = status.durationMillis || 0;
-      if (dur && next > dur) next = dur - 500;
-      await videoRef.current?.setPositionAsync(next);
-    } catch (e) {}
+      player.currentTime = Math.max(0, Math.min(timeInSeconds, duration || 0));
+    } catch (e) {
+      console.error("❌ Erreur seek:", e);
+    }
   };
 
-  const onSeek = async (pos) => {
-    if (isWebViewMode) return;
-    try {
-      await videoRef.current?.setPositionAsync(pos);
-    } catch (e) {}
+  const skipSeconds = (seconds) => {
+    if (!isLoaded) return;
+    const newTime = (currentTime || 0) + seconds;
+    seekTo(newTime);
   };
 
   const toggleFullscreen = async () => {
-    if (isFullscreen) {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-      setIsFullscreen(false);
-    } else {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
-      setIsFullscreen(true);
+    try {
+      if (isFullscreen) {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+        setIsFullscreen(false);
+      } else {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
+        setIsFullscreen(true);
+      }
+    } catch (e) {
+      console.error("❌ Erreur toggle fullscreen:", e);
     }
   };
 
   const handleNextEpisode = () => {
     if (typeof onNext === "function") return onNext();
-    // otherwise nothing; could be wired to navigation/pop
+    console.log("🔄 Next episode non configuré");
   };
 
   const handleCast = () => {
@@ -195,39 +260,111 @@ export default function Player() {
     Alert.alert("Cast", "Fonction de cast non configurée.");
   };
 
-  const formatTime = (ms) => {
-    const total = Math.max(0, Math.floor((ms || 0) / 1000));
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m < 10 ? "0" : ""}${m}:${s < 10 ? "0" : ""}${s}`;
-  };
+  // ============================================================
+  // 🔄 GESTION LANGUES ET SOURCES
+  // ============================================================
 
-  // ---------- Language / source switching in settings ----------
   const languagesKeys = useMemo(() => Object.keys(episode.languages || {}), [episode]);
 
-  const switchLanguage = (lang) => {
+  const switchLanguage = async (lang) => {
     if (!lang) return;
+
+    console.log(`🌐 V2 Switch vers langue: ${lang}`);
     setCurrentLanguage(lang);
     setCurrentSourceIndex(0);
+    setIsLoading(true);
+    setError(null);
+
     const arr = episode.languages?.[lang] || [];
-    const pick = arr.find(Boolean);
-    if (pick) setCurrentUrl(pick);
-    else Alert.alert("Langue", "Aucun lien pour cette langue.");
-    setShowSettings(false);
+    const rawUrl = arr.find(Boolean);
+
+    if (!rawUrl) {
+      Alert.alert("Langue", "Aucun lien pour cette langue.");
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      // Essayer d'extraire avec VideoExtractor V5
+      if (!isDirectMediaUrl(rawUrl)) {
+        console.log("🔧 V2 Extraction nécessaire avec VideoExtractor V5...");
+        const extractionResult = await VideoExtractorV5.extractVideoUrl(rawUrl, {
+          preferMp4: true,
+          timeout: 60000
+        });
+
+        if (extractionResult && extractionResult.url) {
+          setCurrentUrl(extractionResult.url);
+          setStreamHeaders(extractionResult.headers || {});
+          console.log("✅ V2 Extraction réussie, nouvelle URL:", extractionResult.url.slice(0, 80));
+        } else {
+          throw new Error("Extraction V5 failed - no URL returned");
+        }
+      } else {
+        setCurrentUrl(rawUrl);
+        setStreamHeaders({});
+        console.log("✅ V2 URL directe utilisée:", rawUrl.slice(0, 80));
+      }
+    } catch (error) {
+      console.error("❌ V2 Erreur switch langue:", error);
+      setError(`Erreur changement langue: ${error.message}`);
+      Alert.alert("Erreur", `Impossible de changer la langue: ${error.message}`);
+    } finally {
+      setIsLoading(false);
+      setShowSettings(false);
+    }
   };
 
-  const switchSource = (idx) => {
+  const switchSource = async (idx) => {
     if (!currentLanguage) return;
+
     const arr = episode.languages?.[currentLanguage] || [];
-    if (!arr || !arr[idx]) return Alert.alert("Source", "Source introuvable.");
+    if (!arr || !arr[idx]) {
+      Alert.alert("Source", "Source introuvable.");
+      return;
+    }
+
+    console.log(`🔄 V2 Switch vers source ${idx}: ${arr[idx].slice(0, 80)}`);
     setCurrentSourceIndex(idx);
-    setCurrentUrl(arr[idx]);
-    setShowSettings(false);
+    setIsLoading(true);
+    setError(null);
+
+    const rawUrl = arr[idx];
+
+    try {
+      if (!isDirectMediaUrl(rawUrl)) {
+        console.log("🔧 V2 Extraction source avec VideoExtractor V5...");
+        const extractionResult = await VideoExtractorV5.extractVideoUrl(rawUrl, {
+          preferMp4: true,
+          timeout: 60000
+        });
+
+        if (extractionResult && extractionResult.url) {
+          setCurrentUrl(extractionResult.url);
+          setStreamHeaders(extractionResult.headers || {});
+          console.log("✅ V2 Source extraite:", extractionResult.url.slice(0, 80));
+        } else {
+          throw new Error("Source extraction failed");
+        }
+      } else {
+        setCurrentUrl(rawUrl);
+        setStreamHeaders({});
+        console.log("✅ V2 Source directe:", rawUrl.slice(0, 80));
+      }
+    } catch (error) {
+      console.error("❌ V2 Erreur switch source:", error);
+      setError(`Erreur changement source: ${error.message}`);
+      Alert.alert("Erreur", `Impossible de changer la source: ${error.message}`);
+    } finally {
+      setIsLoading(false);
+      setShowSettings(false);
+    }
   };
 
   const openInBrowser = async () => {
     const u = currentUrl;
     if (!u) return Alert.alert("Aucun lien");
+
     try {
       await Linking.openURL(u);
     } catch (e) {
@@ -235,237 +372,504 @@ export default function Player() {
     }
   };
 
-  // Set playback rate (video only)
-  const setPlaybackRate = async (r) => {
-    try {
-      if (!isWebViewMode) await videoRef.current?.setRateAsync(r, true);
-    } catch (e) {}
-    setShowSettings(false);
+  // ============================================================
+  // 🎨 HELPERS D'AFFICHAGE
+  // ============================================================
+
+  const formatTime = (seconds) => {
+    const totalSecs = Math.max(0, Math.floor(seconds || 0));
+    const m = Math.floor(totalSecs / 60);
+    const s = totalSecs % 60;
+    return `${m < 10 ? "0" : ""}${m}:${s < 10 ? "0" : ""}${s}`;
   };
 
-  // If currentUrl is null -> show error
+  const displayTitle = episode?.showTitle || 
+                      episode?.animeTitle || 
+                      episode?.title || 
+                      anime?.title ||
+                      "Lecture";
+
+  const displaySubtitle = episode?.subtitle || 
+    (typeof episode?.number === "number" ? `E${episode.number}` : 
+     (episode.number ? `E${episode.number}` : "")) + 
+    (episode?.season ? ` • Saison ${episode.season}` : "");
+
+  // ============================================================
+  // 🚨 GESTION DES ERREURS
+  // ============================================================
+
   if (!currentUrl) {
     return (
-      <View style={styles.errContainer}>
-        <StatusBar hidden />
-        <Text style={{ color: COLORS.ink, marginBottom: 12 }}>Aucun lien vidéo disponible pour cet épisode.</Text>
-        <TouchableOpacity style={styles.errBtn} onPress={() => navigation.goBack()}>
-          <Text style={{ fontWeight: "800" }}>Retour</Text>
-        </TouchableOpacity>
-      </View>
+      <SafeAreaView style={styles.container}>
+        <View style={styles.errorContainer}>
+          <MaterialIcons name="error-outline" size={64} color={COLORS.ink} />
+          <Text style={styles.errorTitle}>Aucun lien vidéo disponible</Text>
+          <Text style={styles.errorMessage}>
+            Aucun lien vidéo disponible pour cet épisode.
+          </Text>
+          <TouchableOpacity 
+            style={styles.errorButton}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={styles.errorButtonText}>Retour</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
-  const displayTitle = episode?.showTitle || episode?.animeTitle || episode?.title || "Lecture";
-  const displaySubtitle = episode?.subtitle || (typeof episode?.number === "number" ? `E${episode.number}` : (episode.number ? `E${episode.number}` : "")) + (episode?.season ? ` • Saison ${episode.season}` : "");
+  if (error) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.errorContainer}>
+          <MaterialIcons name="error-outline" size={64} color={COLORS.ink} />
+          <Text style={styles.errorTitle}>Erreur de lecture</Text>
+          <Text style={styles.errorMessage}>{error}</Text>
+          <TouchableOpacity 
+            style={styles.errorButton}
+            onPress={() => {
+              setError(null);
+              const pick = pickInitialUrlFromEpisode(episode);
+              if (pick) setCurrentUrl(pick);
+            }}
+          >
+            <Text style={styles.errorButtonText}>Réessayer</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.errorButton, { backgroundColor: 'transparent', borderColor: COLORS.ink, borderWidth: 1, marginTop: 10 }]}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={[styles.errorButtonText, { color: COLORS.ink }]}>Retour</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ============================================================
+  // 🎬 RENDU PRINCIPAL
+  // ============================================================
 
   return (
     <View style={styles.container}>
       <StatusBar hidden />
 
-      {/* Video surface */}
-      <View style={styles.videoWrapper}>
-        {!isWebViewMode ? (
-          <Video
-            key={`vid-${videoKey}`}
-            ref={videoRef}
-            source={{ 
-              uri: currentUrl,
-              headers: streamHeaders
-            }}
+      {/* Surface vidéo */}
+      {!isWebViewMode ? (
+        <View style={styles.videoWrapper}>
+          <VideoPlayer
+            player={player}
             style={styles.video}
-            resizeMode="contain"
-            shouldPlay
-            useNativeControls={false}
-            onPlaybackStatusUpdate={(s) => {
-              setStatus(() => s);
-              setIsBuffering(!!s.isBuffering);
-            }}
+            allowsFullscreen={false} // On gère manuellement
+            showsTimecodes={false}
+            requiresLinearPlayback={false}
           />
-        ) : (
-          <WebView
-            ref={webRef}
-            source={{ uri: currentUrl }}
-            style={styles.video}
-            allowsFullscreenVideo
-            mediaPlaybackRequiresUserAction={false}
-            startInLoadingState
-            renderLoading={() => <ActivityIndicator style={{ marginTop: 20 }} color={COLORS.ink} />}
-          />
-        )}
+        </View>
+      ) : (
+        <WebView
+          source={{ 
+            uri: currentUrl,
+            headers: streamHeaders 
+          }}
+          style={styles.video}
+          allowsInlineMediaPlayback={true}
+          mediaPlaybackRequiresUserAction={false}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          allowsFullscreenVideo={true}
+          startInLoadingState={true}
+          renderLoading={() => (
+            <View style={styles.webViewLoading}>
+              <ActivityIndicator size="large" color={COLORS.trackMin} />
+            </View>
+          )}
+        />
+      )}
 
-        {/* tap pour afficher UI */}
-        {!controlsVisible && (
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setControlsVisible(true)} />
-        )}
+      {/* Overlay tap pour montrer contrôles */}
+      {!controlsVisible && (
+        <TouchableOpacity
+          style={styles.tapOverlay}
+          onPress={() => setControlsVisible(true)}
+          activeOpacity={1}
+        />
+      )}
 
-        {/* overlay dim */}
-        {controlsVisible && <View style={styles.dimOverlay} />}
+      {/* Overlay sombre quand contrôles visibles */}
+      {controlsVisible && <View style={styles.dimOverlay} />}
 
-        {/* PEGI small when hidden (skipped for brevity) */}
-      </View>
+      {/* Loading overlay */}
+      {isLoading && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color={COLORS.trackMin} />
+          <Text style={styles.loadingText}>Chargement...</Text>
+        </View>
+      )}
 
-      {/* Controls overlay */}
+      {/* Contrôles overlay */}
       {controlsVisible && (
-        <View style={styles.overlay} pointerEvents="box-none">
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setControlsVisible(false)} />
-
+        <TouchableOpacity
+          style={styles.overlay}
+          onPress={() => setControlsVisible(false)}
+          activeOpacity={1}
+        >
           {/* Top bar */}
-          <View style={styles.topBar} pointerEvents="box-none">
-            <View style={styles.topLeft} pointerEvents="auto">
+          <View style={styles.topBar}>
+            <View style={styles.topLeft}>
               <TouchableOpacity onPress={() => navigation.goBack()}>
-                <MaterialIcons name="arrow-back" size={20} color={COLORS.ink} />
+                <MaterialIcons name="arrow-back" size={24} color={COLORS.ink} />
               </TouchableOpacity>
-
               <View style={styles.titleWrap}>
-                <Text numberOfLines={1} style={styles.title}>{displayTitle}</Text>
-                {!!displaySubtitle && <Text numberOfLines={1} style={styles.subtitle}>{displaySubtitle}</Text>}
+                <Text style={styles.title} numberOfLines={1}>{displayTitle}</Text>
+                {!!displaySubtitle && (
+                  <Text style={styles.subtitle} numberOfLines={1}>{displaySubtitle}</Text>
+                )}
               </View>
             </View>
 
-            <View style={styles.topRight} pointerEvents="auto">
-              <TouchableOpacity onPress={handleNextEpisode} style={styles.iconBtn}>
-                <MaterialCommunityIcons name="skip-next" size={22} color={COLORS.ink} />
-              </TouchableOpacity>
-
-              <TouchableOpacity onPress={handleCast} style={styles.iconBtn}>
-                <MaterialCommunityIcons name="cast" size={22} color={COLORS.ink} />
-              </TouchableOpacity>
-
-              {/* reuse settings button to show languages + sources + speeds */}
-              <TouchableOpacity onPress={() => setShowSettings(v => !v)} style={styles.iconBtn}>
-                <MaterialCommunityIcons name="cog" size={22} color={COLORS.ink} />
-              </TouchableOpacity>
-
-              <TouchableOpacity onPress={toggleFullscreen} style={styles.iconBtn}>
-                <MaterialIcons name={isFullscreen ? "fullscreen-exit" : "fullscreen"} size={22} color={COLORS.ink} />
+            <View style={styles.topRight}>
+              <TouchableOpacity 
+                onPress={() => setShowSettings(v => !v)} 
+                style={styles.iconBtn}
+              >
+                <MaterialIcons name="settings" size={20} color={COLORS.ink} />
               </TouchableOpacity>
             </View>
+          </View>
 
-            {/* Settings menu */}
-            {showSettings && (
-              <View style={styles.settingsMenu} pointerEvents="auto">
-                {/* Languages */}
-                {languagesKeys.length > 0 && (
-                  <View style={{ paddingBottom: 8 }}>
-                    <Text style={styles.settingsHeader}>Langues</Text>
-                    {languagesKeys.map((lk) => (
-                      <TouchableOpacity key={lk} style={styles.menuItem} onPress={() => switchLanguage(lk)}>
-                        <Text style={[styles.menuItemText, lk === currentLanguage ? { fontWeight: "800" } : {}]}>{lk}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
-
-                {/* Sources for current language */}
-                {currentLanguage && Array.isArray(episode.languages?.[currentLanguage]) && (
-                  <View style={{ paddingBottom: 8 }}>
-                    <Text style={styles.settingsHeader}>Serveurs ({currentLanguage})</Text>
-                    {episode.languages[currentLanguage].map((u, i) => (
-                      <TouchableOpacity key={String(i)} style={styles.menuItem} onPress={() => switchSource(i)}>
-                        <Text numberOfLines={1} style={[styles.menuItemText, i === currentSourceIndex ? { fontWeight: "800" } : {}]}>{u}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
-
-                {/* playback speeds */}
+          {/* Menu Settings */}
+          {showSettings && (
+            <View style={styles.settingsMenu}>
+              {/* Langues */}
+              {languagesKeys.length > 0 && (
                 <View>
-                  <Text style={styles.settingsHeader}>Vitesse</Text>
-                  {[0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map((r) => (
-                    <TouchableOpacity key={r} style={styles.menuItem} onPress={() => setPlaybackRate(r)}>
-                      <Text style={styles.menuItemText}>{r}x</Text>
+                  <Text style={styles.settingsHeader}>Langues</Text>
+                  {languagesKeys.map((lk) => (
+                    <TouchableOpacity
+                      key={lk}
+                      onPress={() => switchLanguage(lk)}
+                      style={[
+                        styles.menuItem,
+                        currentLanguage === lk && { backgroundColor: COLORS.trackMin }
+                      ]}
+                    >
+                      <Text style={[
+                        styles.menuItemText,
+                        currentLanguage === lk && { fontWeight: 'bold' }
+                      ]}>
+                        {lk}
+                      </Text>
                     </TouchableOpacity>
                   ))}
                 </View>
+              )}
 
-                {/* open in browser */}
-                <TouchableOpacity style={[styles.menuItem, { marginTop: 6 }]} onPress={openInBrowser}><Text style={styles.menuItemText}>Ouvrir dans le navigateur</Text></TouchableOpacity>
-              </View>
-            )}
-          </View>
+              {/* Sources pour langue courante */}
+              {currentLanguage && Array.isArray(episode.languages?.[currentLanguage]) && (
+                <View style={{ marginTop: 15 }}>
+                  <Text style={styles.settingsHeader}>
+                    Serveurs ({currentLanguage})
+                  </Text>
+                  {episode.languages[currentLanguage].map((u, i) => (
+                    <TouchableOpacity
+                      key={i}
+                      onPress={() => switchSource(i)}
+                      style={[
+                        styles.menuItem,
+                        currentSourceIndex === i && { backgroundColor: COLORS.trackMin }
+                      ]}
+                    >
+                      <Text style={[
+                        styles.menuItemText,
+                        currentSourceIndex === i && { fontWeight: 'bold' }
+                      ]} numberOfLines={1}>
+                        Serveur {i + 1}: {new URL(u).hostname}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
 
-          {/* center controls */}
-          <View style={styles.centerRow} pointerEvents="box-none">
-            <TouchableOpacity onPress={() => skipMs(-10000)} style={styles.sideCircle}>
-              <MaterialCommunityIcons name="rewind-10" size={52} color={COLORS.ink} />
+              {/* Ouvrir dans navigateur */}
+              <TouchableOpacity onPress={openInBrowser} style={styles.menuItem}>
+                <Text style={styles.menuItemText}>Ouvrir dans le navigateur</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Centre: contrôles de lecture */}
+          <View style={styles.centerRow}>
+            <TouchableOpacity
+              onPress={() => skipSeconds(-10)}
+              style={styles.sideCircle}
+            >
+              <MaterialIcons name="replay-10" size={24} color={COLORS.ink} />
             </TouchableOpacity>
 
             <TouchableOpacity onPress={togglePlayPause} style={styles.playCircle}>
-              <MaterialCommunityIcons name={status?.isPlaying ? "pause" : "play"} size={58} color={COLORS.ink} />
+              <MaterialIcons
+                name={player?.playing ? "pause" : "play-arrow"}
+                size={32}
+                color={COLORS.ink}
+              />
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => skipMs(10000)} style={styles.sideCircle}>
-              <MaterialCommunityIcons name="fast-forward-10" size={52} color={COLORS.ink} />
+            <TouchableOpacity
+              onPress={() => skipSeconds(10)}
+              style={styles.sideCircle}
+            >
+              <MaterialIcons name="forward-10" size={24} color={COLORS.ink} />
             </TouchableOpacity>
           </View>
 
-          {/* bottom bar: show slider only in Video mode */}
-          <View style={styles.bottomBar} pointerEvents="auto">
-            <Text style={styles.time}>{formatTime(status?.positionMillis)}</Text>
+          {/* Bottom bar: timeline et temps */}
+          <View style={styles.bottomBar}>
+            <Text style={styles.time}>{formatTime(currentTime)}</Text>
 
             {!isWebViewMode ? (
               <Slider
                 style={styles.slider}
                 minimumValue={0}
-                maximumValue={status?.durationMillis || 1}
-                value={status?.positionMillis || 0}
+                maximumValue={duration || 1}
+                value={currentTime || 0}
+                onValueChange={seekTo}
                 minimumTrackTintColor={COLORS.trackMin}
                 maximumTrackTintColor={COLORS.trackMax}
-                thumbTintColor={COLORS.thumb}
-                step={1000}
-                onSlidingComplete={onSeek}
+                thumbStyle={{ backgroundColor: COLORS.thumb }}
                 onSlidingStart={() => setControlsVisible(true)}
               />
             ) : (
-              <View style={{ flex: 1, alignItems: "center" }}>
-                <Text style={{ color: COLORS.sub, fontSize: 12 }}>{isWebViewMode ? "Embed mode — contrôles limités" : ""}</Text>
+              <View style={styles.slider}>
+                <Text style={[styles.time, { textAlign: 'center' }]}>
+                  Mode WebView - Contrôles limités
+                </Text>
               </View>
             )}
 
-            <Text style={[styles.time, { textAlign: "right" }]}>{!isWebViewMode ? formatTime(status?.durationMillis) : "--:--"}</Text>
+            <Text style={styles.time}>
+              {!isWebViewMode ? formatTime(duration) : "--:--"}
+            </Text>
           </View>
-        </View>
+        </TouchableOpacity>
       )}
-
-      {/* Loading indicator */}
-      {isBuffering && <ActivityIndicator style={styles.loader} size="small" color={COLORS.ink} />}
     </View>
   );
 }
 
+// ============================================================
+// 🎨 STYLES
+// ============================================================
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
-  videoWrapper: { flex: 1 },
-  video: { flex: 1, backgroundColor: COLORS.bg },
-  dimOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: COLORS.dim },
-  overlay: { ...StyleSheet.absoluteFillObject, justifyContent: "space-between" },
-  // top
-  topBar: { paddingTop: 14, paddingHorizontal: 16 },
-  topLeft: { flexDirection: "row", alignItems: "center" },
-  titleWrap: { minWidth: 10, flexShrink: 1, marginLeft: 12 },
-  title: { color: COLORS.ink, fontSize: 18, fontWeight: "700", includeFontPadding: false },
-  subtitle: { color: COLORS.sub, fontSize: 12, marginTop: 2, includeFontPadding: false },
-  topRight: { position: "absolute", right: 10, top: 10, flexDirection: "row", alignItems: "center" },
-  iconBtn: { marginLeft: 14, padding: 6, borderRadius: 8, backgroundColor: "transparent" },
+  container: { 
+    flex: 1, 
+    backgroundColor: COLORS.bg 
+  },
+  
+  videoWrapper: { 
+    flex: 1 
+  },
+  
+  video: { 
+    flex: 1, 
+    backgroundColor: COLORS.bg 
+  },
 
-  // center
-  centerRow: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center" },
-  sideCircle: { padding: 8, marginHorizontal: 28, borderRadius: 999, alignItems: "center", justifyContent: "center" },
-  playCircle: { width: 76, height: 76, borderRadius: 38, alignItems: "center", justifyContent: "center", marginHorizontal: 16, backgroundColor: "rgba(0,0,0,0.35)" },
+  tapOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
 
-  // bottom
-  bottomBar: { paddingHorizontal: 16, paddingBottom: 18, paddingTop: 6, flexDirection: "row", alignItems: "center" },
-  time: { color: COLORS.ink, fontSize: 12, width: 52 },
-  slider: { flex: 1, height: 28, marginHorizontal: 10 },
+  dimOverlay: { 
+    ...StyleSheet.absoluteFillObject, 
+    backgroundColor: COLORS.dim 
+  },
 
-  loader: { position: "absolute", left: 12, bottom: 18 + 28 },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
-  settingsMenu: { position: "absolute", top: 46, right: 8, backgroundColor: "rgba(0,0,0,0.75)", borderRadius: 8, padding: 8, maxWidth: Math.min(560, SCREEN_WIDTH - 40) },
-  settingsHeader: { color: COLORS.ink, fontWeight: "800", marginBottom: 6 },
-  menuItem: { paddingVertical: 6, paddingHorizontal: 8 },
-  menuItemText: { color: COLORS.ink, fontSize: 13 },
+  loadingText: {
+    color: COLORS.ink,
+    fontSize: 16,
+    marginTop: 10,
+  },
 
-  errContainer: { flex: 1, backgroundColor: COLORS.bg, alignItems: "center", justifyContent: "center" },
-  errBtn: { backgroundColor: COLORS.ink, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  webViewLoading: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.bg,
+  },
+
+  overlay: { 
+    ...StyleSheet.absoluteFillObject, 
+    justifyContent: "space-between" 
+  },
+
+  // Top bar
+  topBar: { 
+    paddingTop: 14, 
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center'
+  },
+  
+  topLeft: { 
+    flexDirection: "row", 
+    alignItems: "center",
+    flex: 1
+  },
+  
+  titleWrap: { 
+    minWidth: 10, 
+    flexShrink: 1, 
+    marginLeft: 12,
+    flex: 1
+  },
+  
+  title: { 
+    color: COLORS.ink, 
+    fontSize: 18, 
+    fontWeight: "700", 
+    includeFontPadding: false 
+  },
+  
+  subtitle: { 
+    color: COLORS.sub, 
+    fontSize: 12, 
+    marginTop: 2, 
+    includeFontPadding: false 
+  },
+  
+  topRight: { 
+    flexDirection: "row", 
+    alignItems: "center" 
+  },
+  
+  iconBtn: { 
+    padding: 6, 
+    borderRadius: 8 
+  },
+
+  // Settings menu
+  settingsMenu: {
+    position: "absolute",
+    top: 60,
+    right: 8,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    borderRadius: 8,
+    padding: 12,
+    maxWidth: Math.min(400, SCREEN_WIDTH - 40),
+    maxHeight: 400,
+  },
+
+  settingsHeader: {
+    color: COLORS.ink,
+    fontWeight: "800",
+    marginBottom: 8,
+    fontSize: 14,
+  },
+
+  menuItem: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    marginBottom: 4,
+  },
+
+  menuItemText: {
+    color: COLORS.ink,
+    fontSize: 13,
+  },
+
+  // Centre
+  centerRow: { 
+    flex: 1, 
+    flexDirection: "row", 
+    alignItems: "center", 
+    justifyContent: "center" 
+  },
+  
+  sideCircle: { 
+    padding: 12, 
+    marginHorizontal: 24, 
+    borderRadius: 999, 
+    alignItems: "center", 
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.3)"
+  },
+  
+  playCircle: { 
+    width: 80, 
+    height: 80, 
+    borderRadius: 40, 
+    alignItems: "center", 
+    justifyContent: "center", 
+    marginHorizontal: 16, 
+    backgroundColor: "rgba(0,0,0,0.4)" 
+  },
+
+  // Bottom bar
+  bottomBar: { 
+    paddingHorizontal: 16, 
+    paddingBottom: 18, 
+    paddingTop: 6, 
+    flexDirection: "row", 
+    alignItems: "center" 
+  },
+  
+  time: { 
+    color: COLORS.ink, 
+    fontSize: 12, 
+    width: 52,
+    textAlign: 'center'
+  },
+  
+  slider: { 
+    flex: 1, 
+    height: 28, 
+    marginHorizontal: 10 
+  },
+
+  // Erreurs
+  errorContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+
+  errorTitle: {
+    color: COLORS.ink,
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginTop: 20,
+    textAlign: 'center',
+  },
+
+  errorMessage: {
+    color: COLORS.sub,
+    fontSize: 14,
+    marginTop: 10,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  errorButton: {
+    backgroundColor: COLORS.trackMin,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    marginTop: 20,
+  },
+
+  errorButtonText: {
+    color: COLORS.bg,
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
 });
