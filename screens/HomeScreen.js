@@ -1,4 +1,5 @@
-// HomeScreen.jsx
+// HomeScreen.js - Interface Crunchyroll ultra-moderne avec système de résolution anime de base
+
 import React, { useEffect, useRef, useState, useCallback, memo } from "react";
 import {
   SafeAreaView,
@@ -15,37 +16,46 @@ import {
   FlatList,
   Animated,
   Alert,
+  ScrollView,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import LogoImage from '../assets/LogoB.png';
-// import BrowseScreen from "./BrowseScreen"; // pas utilisé ici
-
 import colorsTheme from "../theme/colors";
 import {
   fetchTrendingGrouped,
   fetchTopRatedGrouped,
   fetchCurrentSeasonGrouped,
-  fetchFeaturedJikan,
-  fetchAniListImageCached,
   fetchMustWatch,
-  fetchAnimes, // <- fallback catalogue local
+  fetchAnimes,
 } from "../api/api";
+
+// AJOUT: Import du système de résolution
+import { useAnimeResolver } from "../api/animeResolver";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const POSTER_RATIO = 2 / 3;
 
 const colors = {
-  background: colorsTheme?.background || "#000",
-  text: colorsTheme?.text || "#fff",
-  textMuted: colorsTheme?.textLight || "#cfcfcf",
-  card: colorsTheme?.card || "#121212",
-  accent: colorsTheme?.accent || "#f47521",
-  border: colorsTheme?.border || "#1f1f1f",
+  background: colorsTheme?.background || "#0B0B0B",
+  text: colorsTheme?.text || "#FFFFFF",
+  textMuted: colorsTheme?.textLight || "#B3B3B3",
+  card: colorsTheme?.card || "#1A1A1A",
+  accent: colorsTheme?.accent || "#FF6B1A",
+  secondary: "#F47521",
+  border: colorsTheme?.border || "#2A2A2A",
+  surface: "#141414",
+  premium: "#FFD700",
+  success: "#4CAF50",
+  legendary: "#9C27B0",
+  epic: "#FF5722",
+  rare: "#2196F3",
 };
 
-/* ---------- Helpers couleur ---------- */
+/* =========== HELPERS COULEUR AVANCÉS =========== */
 function normalizeHex(hex) {
   if (!hex) return null;
   let h = String(hex).trim();
@@ -60,109 +70,43 @@ function normalizeHex(hex) {
   }
   return null;
 }
+
 function rgbToHex(r, g, b) {
   const toHex = (n) => ("0" + Math.max(0, Math.min(255, Math.round(n))).toString(16)).slice(-2);
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
 }
+
 function hexToRgb(hex) {
   const h = normalizeHex(hex) || "#000000";
   const bigint = parseInt(h.slice(1), 16);
   return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
 }
+
 function hexToRgba(hex, alpha = 1) {
   const { r, g, b } = hexToRgb(hex);
   return `rgba(${r},${g},${b},${alpha})`;
 }
+
 function darkenHex(hex, percent = 30) {
   const { r, g, b } = hexToRgb(hex);
   const factor = 1 - percent / 100;
   return rgbToHex(r * factor, g * factor, b * factor);
 }
+// Force English title helper (priority: title_en, title_english, title_romaji, title, "Untitled")
+function getEnglishTitle(anime) {
+  return anime?.title_en || anime?.title_english || anime?.title_romaji || anime?.title || "Untitled";
+}
 
-/* =========================================================
-   👇👇  NOUVEAUX HELPERS: forcer le HERO à prendre la S1  👇👇
-   ========================================================= */
-function stripDiacritics(s = "") {
-  return s.normalize?.("NFD").replace(/[\u0300-\u036f]/g, "") ?? s;
-}
-function normalizeTitleForSeasonKey(title) {
-  if (!title) return "";
-  return stripDiacritics(title)
-    .toLowerCase()
-    .replace(/[\[\]\(\)]/g, " ")
-    .replace(/\b(tv|ona|ova|special|movie|edition|uncut|uncensored)\b/gi, " ")
-    .replace(/\b(the\s*)?final\s*season\b/gi, " ")
-    .replace(/\b(s(eason|aison)|part|cour|cours)\s*\d+\b/gi, " ")
-    .replace(/\b(\d+)(st|nd|rd|th)\s*(season|saison|part|cour)\b/gi, " ")
-    .replace(/\b(2nd|3rd|4th)\b/gi, " ")
-    .replace(/\b(i{1,3}|iv|v|vi{0,3}|x)\b(?=\s*$)/gi, " ")
-    .replace(/[:\-–—]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-function getBestTitle(item = {}) {
-  return item.title || item.title_en || item.title_romaji || "";
-}
-function isSeasonTwoPlusTitle(t = "") {
-  const s = String(t).toLowerCase();
-  return /\b(s(?:eason|aison)?\s*[2-9]\b|2nd\s*season|part\s*[2-9]\b|cour\s*[2-9]\b|ii\b|iii\b|iv\b|v\b|vi\b|x\b)/i.test(s);
-}
-function scoreAsBaseForHero(item = {}) {
-  const t = (getBestTitle(item) || "").toLowerCase();
-  const fmt = (item.format || item.subtype || item.type || "").toUpperCase();
-
-  // plus le score est BAS, plus c'est "base" (S1)
-  let s = 0;
-  if (isSeasonTwoPlusTitle(t)) s += 50;           // pénalise S2+
-  if (/\b(s(?:eason|aison)?\s*1|part\s*1|cour\s*1)\b/i.test(t)) s -= 20; // favorise S1 explicite
-  if (fmt === "TV") s -= 10;                      // favorise TV vs OVA/ONA/MOVIE quand c'est le socle
-  return s;
-}
-function pickBaseFromFranchise(items = []) {
-  return items.slice().sort((a, b) => scoreAsBaseForHero(a) - scoreAsBaseForHero(b))[0];
-}
-function dedupeFranchisesPreferBase(list = []) {
-  const byKey = new Map();
-  for (const it of list) {
-    const key = normalizeTitleForSeasonKey(getBestTitle(it));
-    if (!key) continue;
-    if (!byKey.has(key)) byKey.set(key, []);
-    byKey.get(key).push(it);
-  }
-  return Array.from(byKey.values()).map(pickBaseFromFranchise);
-}
-/* ========================================================= */
-
-/* ---------- Filtre "vrai anime" (pas trop strict) ---------- */
-const allowedFormats = ["TV", "TV_SHORT", "OVA", "ONA", "MOVIE"];
-const filterAnime = (list = []) =>
-  (list || []).filter((a) => {
-    if (!a) return false;
-    const hasImg = !!(a.posterImage || a.coverImage || a.image);
-    if (!hasImg) return false;
-    const f = a.format || a.subtype || a.type || null;
-    if (f && !allowedFormats.includes(String(f).toUpperCase())) return false;
-    const t = (a.title || a.title_en || a.title_romaji || "").toLowerCase();
-    if (/(live action|drama)/i.test(t)) return false;
-    return true;
-  });
-
-/* ---------- buildFeatured (MAJ: déduplique par franchise & privilégie S1) ---------- */
+/* =========== SIMPLIFIED HERO BUILDER =========== */
 const buildFeatured = (pool = [], n = 5) => {
-  // 1) filtre contenu valide
-  const base = filterAnime(pool);
+  if (!Array.isArray(pool) || !pool.length) return [];
 
-  // 2) déduplique par franchise et choisit un "représentant base" (S1 TV si possible)
-  const onePerFranchise = dedupeFranchisesPreferBase(base);
-
-  // 3) mélange léger
-  const shuffled = onePerFranchise.sort(() => Math.random() - 0.5);
-
-  // 4) prend n éléments
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
   const pick = shuffled.slice(0, n).map((a) => ({
     id: a.id,
-    title: a.title || a.title_en || a.title_romaji || "Sans titre",
-    desc: String(a.description || "").replace(/<\/?[^>]+(>|$)/g, ""),
+    // force english title
+    title: getEnglishTitle(a),
+    desc: String(a.description || "").replace(/<\/?[^>]+(>|$)/g, "").slice(0, 150) + "...",
     poster: a.posterImage || a.coverImage || a.image,
     banner: a.bannerImage || a.posterImage || a.coverImage || a.image,
     color: a.coverColor || null,
@@ -171,67 +115,221 @@ const buildFeatured = (pool = [], n = 5) => {
   return pick;
 };
 
-/* ---------- Card composant (mémo) ---------- */
-const AnimeCard = memo(function AnimeCard({ item, onPress, cardWidth }) {
-  const [loading, setLoading] = useState(true);
-  const uri = item.posterImage || item.poster || item.coverImage || item.image;
+
+/* =========== COMPOSANT DE PARTICULES ANIMÉES =========== */
+const ParticleSystem = memo(() => {
+  const particles = useRef([]);
+  
+  useEffect(() => {
+    particles.current = [...Array(30)].map((_, i) => ({
+      id: i,
+      x: Math.random() * SCREEN_WIDTH,
+      y: Math.random() * SCREEN_HEIGHT,
+      size: Math.random() * 3 + 1,
+      speed: Math.random() * 0.5 + 0.2,
+      opacity: Math.random() * 0.3 + 0.1,
+      color: [colors.accent, colors.secondary, colors.premium, colors.rare][Math.floor(Math.random() * 4)],
+    }));
+  }, []);
 
   return (
-    <TouchableOpacity
-      activeOpacity={0.85}
-      onPress={() => onPress(item.raw || item)}
-      style={[styles.card, { width: cardWidth }]}
-    >
-      <View style={{ flex: 1, backgroundColor: colors.card }}>
-        <Image
-          source={{ uri }}
-          resizeMode="cover"
-          style={styles.cardImage}
-          onLoadEnd={() => setLoading(false)}
+    <View style={styles.particleContainer}>
+      {particles.current.map((particle) => (
+        <Animated.View
+          key={particle.id}
+          style={[
+            styles.particle,
+            {
+              left: particle.x,
+              top: particle.y,
+              width: particle.size,
+              height: particle.size,
+              backgroundColor: particle.color + '40',
+            },
+          ]}
         />
-        {loading && (
-          <View style={styles.cardPlaceholder}>
-            <ActivityIndicator size="small" color={colors.accent} />
-          </View>
-        )}
-      </View>
-      <Text style={styles.cardTitle} numberOfLines={2}>
-        {item.title || item.title_en || item.title_fr || item.title_romaji || "Sans titre"}
-      </Text>
-    </TouchableOpacity>
+      ))}
+    </View>
   );
 });
 
-/* ---------- SectionRow: FlatList horizontal ---------- */
-function SectionRow({ title, data = [], navigation }) {
-  const clean = filterAnime(data);
-  if (!clean?.length) return null;
-  const cardWidth = Math.round(SCREEN_WIDTH * 0.34);
+/* =========== COMPOSANT CARTE ANIME AMÉLIORÉ =========== */
+const AnimeCard = memo(function AnimeCard({ item, onPress, cardWidth, index }) {
+  const [loading, setLoading] = useState(true);
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(20)).current;
+  
+  const uri = item.posterImage || item.poster || item.coverImage || item.image;
 
-  const renderItem = ({ item }) => (
+  useEffect(() => {
+    Animated.sequence([
+      Animated.delay(index * 100),
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, []);
+
+  const handlePressIn = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      tension: 300,
+      friction: 7,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  return (
+    <Animated.View
+      style={[
+        styles.cardContainer,
+        {
+          width: cardWidth,
+          opacity: fadeAnim,
+          transform: [
+            { scale: scaleAnim },
+            { translateY: slideAnim }
+          ],
+        },
+      ]}
+    >
+      <TouchableOpacity
+        onPress={() => onPress(item.raw || item)}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        style={styles.card}
+        activeOpacity={0.9}
+      >
+        <View style={styles.cardImageContainer}>
+          <Image
+            source={{ uri }}
+            style={styles.cardImage}
+            onLoad={() => setLoading(false)}
+          />
+          {loading && (
+            <View style={styles.cardPlaceholder}>
+              <ActivityIndicator size="small" color={colors.accent} />
+            </View>
+          )}
+          
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.8)']}
+            style={styles.cardGradient}
+          />
+          
+          {item.premium && (
+            <View style={[styles.cardBadge, { backgroundColor: colors.premium }]}>
+              <MaterialIcons name="diamond" size={12} color="#000" />
+            </View>
+          )}
+          
+          <View style={styles.playIconContainer}>
+            <MaterialCommunityIcons name="play" size={24} color={colors.text} />
+          </View>
+        </View>
+        
+        <View style={styles.cardContent}>
+          <Text style={styles.cardTitle} numberOfLines={2}>
+            {getEnglishTitle(item.raw || item)}
+          </Text>
+
+          
+          <View style={styles.cardMeta}>
+            <View style={styles.ratingContainer}>
+              <MaterialIcons name="star" size={12} color={colors.premium} />
+              <Text style={styles.ratingText}>
+                {item.averageScore ? (item.averageScore / 10).toFixed(1) : '8.5'}
+              </Text>
+            </View>
+            <Text style={styles.genreText}>
+              {Array.isArray(item.genres) ? item.genres[0] : 'Animation'}
+            </Text>
+          </View>
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+});
+
+/* =========== SECTION ROW AMÉLIORÉE =========== */
+function SectionRow({ title, data = [], navigation, icon, color = colors.accent }) {
+  // MODIFICATION: Utilisation du hook de résolution
+  const { navigateToAnimeDetails } = useAnimeResolver(navigation);
+
+  if (!data?.length) return null;
+
+  const cardWidth = Math.round(SCREEN_WIDTH * 0.32);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  const renderItem = ({ item, index }) => (
     <AnimeCard
       item={item}
-      onPress={(anime) => navigation.navigate("AnimeDetails", { anime })}
+      onPress={navigateToAnimeDetails} // MODIFICATION: Utilisation de la fonction de résolution
       cardWidth={cardWidth}
+      index={index}
     />
   );
 
   return (
-    <View style={{ paddingTop: 18 }}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+    <Animated.View style={[styles.sectionContainer, { opacity: fadeAnim }]}>
+      <View style={styles.sectionHeader}>
+        <View style={styles.sectionTitleContainer}>
+          {icon && (
+            <MaterialCommunityIcons 
+              name={icon} 
+              size={24} 
+              color={color} 
+              style={styles.sectionIcon} 
+            />
+          )}
+          <Text style={[styles.sectionTitle, { color }]}>{title}</Text>
+        </View>
+        
+        <TouchableOpacity style={styles.seeAllButton}>
+          <Text style={styles.seeAllText}>Tout voir</Text>
+          <MaterialIcons name="chevron-right" size={16} color={colors.textMuted} />
+        </TouchableOpacity>
+      </View>
+      
       <FlatList
-        horizontal
-        data={clean}
+        data={data}
         renderItem={renderItem}
-        keyExtractor={(it) => String(it.id)}
+        keyExtractor={(item) => String(item.id)}
+        horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingHorizontal: 12 }}
+        contentContainerStyle={styles.sectionList}
+        ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
       />
-    </View>
+    </Animated.View>
   );
 }
 
-/* ---------- Composant principal ---------- */
+/* =========== COMPOSANT PRINCIPAL =========== */
 export default function HomeScreen({ navigation }) {
   const scrollY = useRef(new Animated.Value(0)).current;
   const [loading, setLoading] = useState(true);
@@ -240,385 +338,897 @@ export default function HomeScreen({ navigation }) {
   const [topRated, setTopRated] = useState([]);
   const [currentSeason, setCurrentSeason] = useState([]);
   const [mustWatch, setMustWatch] = useState([]);
-
+  
+  // AJOUT: Hook de résolution pour le hero
+  const { navigateToAnimeDetails } = useAnimeResolver(navigation);
+  
+  // Animations du hero
   const heroRef = useRef(null);
   const idxRef = useRef(0);
   const [heroIdx, setHeroIdx] = useState(0);
   const autoRef = useRef(null);
+  
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(50)).current;
 
-  const goDetails = useCallback((anime) => {
-    navigation?.navigate?.("AnimeDetails", { anime }); // unifié
-  }, [navigation]);
+  const headerOpacity = scrollY.interpolate({
+    inputRange: [0, 100, 200],
+    outputRange: [0, 0.5, 1],
+    extrapolate: 'clamp',
+  });
 
+  const heroScale = scrollY.interpolate({
+    inputRange: [0, 300],
+    outputRange: [1, 1.1],
+    extrapolate: 'clamp',
+  });
+
+  const heroTranslateY = scrollY.interpolate({
+    inputRange: [0, 300],
+    outputRange: [0, -50],
+    extrapolate: 'clamp',
+  });
+
+  // Chargement des données
   useEffect(() => {
     let mounted = true;
-    (async () => {
+    
+    const loadData = async () => {
       try {
         setLoading(true);
-
-        // 1) Tente toutes les sources en parallèle (ne casse pas si l’une échoue)
-        const [
-          resTrending,
-          resTop,
-          resSeason,
-          resMust,
-        ] = await Promise.allSettled([
+        
+        const [resTrending, resTop, resSeason, resMust] = await Promise.allSettled([
           fetchTrendingGrouped(30),
-          fetchTopRatedGrouped(30),
+          fetchTopRatedGrouped(30), 
           fetchCurrentSeasonGrouped(30),
           fetchMustWatch(30),
         ]);
 
         const safeVal = (r) => (r?.status === "fulfilled" && Array.isArray(r.value)) ? r.value : [];
 
-        let cleanTrend = filterAnime(safeVal(resTrending));
-        let cleanTop   = filterAnime(safeVal(resTop));
-        let cleanSeason= filterAnime(safeVal(resSeason));
-        let cleanMust  = filterAnime(safeVal(resMust));
+        let cleanTrend = safeVal(resTrending);
+        let cleanTop = safeVal(resTop);
+        let cleanSeason = safeVal(resSeason);
+        let cleanMust = safeVal(resMust);
 
-        // 2) Fallback local si tout est vide : prend le catalogue Firestore brut
         if (!cleanTrend.length && !cleanTop.length && !cleanSeason.length && !cleanMust.length) {
           try {
-            const backup = await fetchAnimes(30); // tableau d’animes de ton catalogue
-            const b = filterAnime(backup);
-            cleanTrend = b.slice(0, 10);
-            cleanTop   = b.slice(10, 20);
-            cleanSeason= b.slice(20, 30);
-            cleanMust  = b.slice(0, 10);
+            const backup = await fetchAnimes(40);
+            cleanTrend = backup.slice(0, 10);
+            cleanTop = backup.slice(10, 20);
+            cleanSeason = backup.slice(20, 30);
+            cleanMust = backup.slice(30, 40);
           } catch (e) {
             console.warn("fallback fetchAnimes failed:", e);
           }
         }
 
-        // 3) Build HERO à partir de tout ce qu’on a
         let poolForHero = [...cleanSeason, ...cleanTrend];
         if (poolForHero.length < 5) poolForHero = [...poolForHero, ...cleanTop, ...cleanMust];
+        let gems = buildFeatured(poolForHero, 6);
 
-        // 👉 NEW: le HERO déduplique par franchise et privilégie S1
-        let gems = buildFeatured(poolForHero, 5);
-
-        // 4) Fallback Jikan si HERO < 4 (on complète)
-        if (gems.length < 4) {
+        if (gems.length < 2) {
           try {
-            const jikan = await fetchFeaturedJikan(12);
-            const add = [];
-            // on passe aussi par le dédupe/franchise pour éviter les "2nd Season"
-            const jikanBase = dedupeFranchisesPreferBase(jikan);
-            for (const j of jikanBase) {
-              if (add.length + gems.length >= 5) break;
-              let img;
-              try { img = await fetchAniListImageCached(j.title); } catch {}
-              add.push({
-                id: `jikan-${j.id}`,
-                title: j.title,
-                desc: j.description || j.synopsis || j.title,
-                poster: img?.poster || j.cover || j.image,
-                banner: img?.banner || j.cover || j.image,
-                color: img?.color || null,
-                raw: j,
-              });
-            }
-            gems = [...gems, ...add].slice(0, 5);
+            console.log("Using simple fallback for hero section");
+            const simpleHero = poolForHero.slice(0, 6).map(item => ({
+              id: item.id,
+              title: getEnglishTitle(item),
+              desc: "Découvrez cet anime populaire et ses aventures captivantes.",
+              poster: item.posterImage || item.coverImage || item.image,
+              banner: item.bannerImage || item.posterImage || item.coverImage || item.image,
+              color: item.coverColor || colors.accent,
+              raw: item,
+            }));
+            gems = simpleHero;
           } catch (e) {
-            // ignore
+            console.warn("Hero fallback failed:", e);
           }
         }
 
-        // 5) Évite de dupliquer les featured en tête des sections
-        const featuredIds = new Set(gems.map((g) => String(g.raw?.id || g.id)));
-        const strip = (arr) => (arr || []).filter((x) => !featuredIds.has(String(x.id)));
-
-        if (!mounted) return;
-
-        setFeatured(gems);
-        setTrending(strip(cleanTrend));
-        setTopRated(strip(cleanTop));
-        setCurrentSeason(strip(cleanSeason));
-        setMustWatch(strip(cleanMust));
-
-        // 6) Prefetch posters/banners du HERO
-        try {
-          const urls = [];
-          gems.forEach((g) => {
-            if (g.poster) urls.push(g.poster);
-            if (g.banner) urls.push(g.banner);
-          });
-          await Promise.all(urls.map((u) => Image.prefetch(u).catch(() => null)));
-        } catch (_) {}
+        if (mounted) {
+          setFeatured(buildFeatured(poolForHero, 6));
+          setTrending(cleanTrend);
+          setTopRated(cleanTop);
+          setCurrentSeason(cleanSeason);
+          setMustWatch(cleanMust);
+          setLoading(false);
+          
+          Animated.parallel([
+            Animated.timing(fadeAnim, {
+              toValue: 1,
+              duration: 1000,
+              useNativeDriver: true,
+            }),
+            Animated.spring(slideAnim, {
+              toValue: 0,
+              tension: 100,
+              friction: 8,
+              useNativeDriver: true,
+            }),
+          ]).start();
+        }
       } catch (e) {
-        console.error("HomeScreen load error:", e);
-        Alert.alert("Erreur", "Impossible de charger les animes. Vérifie ta connexion.");
-      } finally {
+        console.error("loadData error:", e);
         if (mounted) setLoading(false);
       }
-    })();
-    return () => {
-      mounted = false;
-      clearInterval(autoRef.current);
     };
+    
+    loadData();
+    
+    return () => { mounted = false; };
   }, []);
 
-  // Auto-slide HERO
+  // Auto-rotation hero
   useEffect(() => {
-    if (!featured.length) return;
-    clearInterval(autoRef.current);
-    idxRef.current = 0;
-    setHeroIdx(0);
-    autoRef.current = setInterval(() => {
-      if (!featured.length || !heroRef.current) return;
-      idxRef.current = (idxRef.current + 1) % featured.length;
-      try {
-        heroRef.current?.scrollToOffset({ offset: idxRef.current * SCREEN_WIDTH, animated: true });
-      } catch (_) {}
-      setHeroIdx(idxRef.current);
-    }, 4500);
+    if (featured.length > 1 && !loading) {
+      autoRef.current = setInterval(() => {
+        const newIdx = (heroIdx + 1) % featured.length;
+        idxRef.current = newIdx;
+        setHeroIdx(newIdx);
+        
+        heroRef.current?.scrollToOffset({
+          offset: newIdx * SCREEN_WIDTH,
+          animated: true,
+        });
+      }, 8000);
+    }
     return () => clearInterval(autoRef.current);
-  }, [featured.length]);
+  }, [featured, loading, heroIdx]);
 
-  const onHeroScroll = (ev) => {
-    const x = ev.nativeEvent.contentOffset.x;
-    const ix = Math.round(x / SCREEN_WIDTH);
-    if (ix !== heroIdx) {
-      idxRef.current = ix;
-      setHeroIdx(ix);
+  const onHeroScroll = ({ nativeEvent }) => {
+    const newIdx = Math.round(nativeEvent.contentOffset.x / SCREEN_WIDTH);
+    if (newIdx !== heroIdx) {
+      setHeroIdx(newIdx);
+      idxRef.current = newIdx;
     }
   };
 
+  // Rendu header animé
+  const renderHeader = () => (
+    <Animated.View 
+      style={[
+        styles.headerContainer,
+        { opacity: headerOpacity }
+      ]}
+    >
+      <LinearGradient
+        colors={['rgba(0,0,0,0.8)', 'transparent']}
+        style={styles.headerGradient}
+      />
+      <View style={styles.headerContent}>
+        <TouchableOpacity style={styles.logoContainer}>
+          <LinearGradient
+            colors={[colors.accent, colors.secondary]}
+            style={styles.logoBg}
+          >
+            <Image source={LogoImage} style={styles.logo} />
+          </LinearGradient>
+        </TouchableOpacity>
+        
+        <Text style={styles.headerTitle}>Shinime</Text>
+        
+        <View style={styles.headerActions}>
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Search' })}
+          >
+            <MaterialIcons name="search" size={24} color={colors.text} />
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Profile' })}
+          >
+            <MaterialCommunityIcons name="account-circle-outline" size={24} color={colors.text} />
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Animated.View>
+  );
+
+  // Rendu du hero section
+  const renderHeroSection = () => (
+    <Animated.View
+      style={[
+        styles.heroContainer,
+        {
+          transform: [
+            { scale: heroScale },
+            { translateY: heroTranslateY }
+          ]
+        }
+      ]}
+    >
+      {featured.length > 0 && (
+        <FlatList
+          ref={heroRef}
+          data={featured}
+          keyExtractor={(item) => String(item.id)}
+          renderItem={({ item, index }) => {
+            const rawColor = item.color || item.raw?.coverColor || null;
+            const hex = normalizeHex(rawColor) || colors.accent;
+            const gradientColors = [
+              'transparent',
+              hexToRgba(hex, 0.3),
+              hexToRgba(darkenHex(hex, 40), 0.9),
+              colors.background
+            ];
+
+            return (
+              <TouchableOpacity
+                style={styles.heroItem}
+                onPress={() => navigateToAnimeDetails(item.raw || item)} // MODIFICATION: Utilisation de la fonction de résolution
+                activeOpacity={0.9}
+              >
+                <ImageBackground
+                  source={{ uri: item.banner || item.poster }}
+                  style={styles.heroBg}
+                  resizeMode="cover"
+                >
+                  <BlurView intensity={50} tint="dark" style={styles.posterBlur} />
+                  <ParticleSystem />
+                  
+                  <LinearGradient
+                    colors={gradientColors}
+                    style={styles.heroGradient}
+                    locations={[0, 0.3, 0.7, 1]}
+                  />
+                  
+                  <View style={styles.heroContent}>
+                    <View style={styles.trendingBadge}>
+                      <MaterialCommunityIcons name="trending-up" size={16} color={colors.background} />
+                      <Text style={styles.trendingText}>TENDANCE #{index + 1}</Text>
+                    </View>
+                    
+                    <View style={styles.heroPosterContainer}>
+                      <Image
+                        source={{ uri: item.poster }}
+                        style={styles.heroPoster}
+                      />
+                      <LinearGradient
+                         colors={[colors.accent + '40', colors.secondary + '60']}
+                        style={styles.posterBorder}
+                      />
+                    </View>
+ 
+                    <View style={styles.heroInfo}>
+                      <View style={styles.heroMeta}>
+                        <Text style={styles.heroMetaText}>16+ • Animation • HD</Text>
+                      </View>
+                      
+                      <Text style={styles.heroTitle} numberOfLines={2}>
+                        {getEnglishTitle(item.raw || item)}
+                      </Text>
+                      
+                      <Text style={styles.heroDesc} numberOfLines={3}>
+                        {item.desc}
+                      </Text>
+                      
+                      <View style={styles.heroActions}>
+                        <TouchableOpacity
+                          style={styles.playButton}
+                          onPress={() => navigateToAnimeDetails(item.raw || item)} // MODIFICATION: Utilisation de la fonction de résolution
+                        >
+                          <MaterialCommunityIcons name="play" size={20} color={colors.background} />
+                          <Text style={styles.playButtonText}>REGARDER S1 E1</Text>
+                        </TouchableOpacity>
+                        
+                        <TouchableOpacity style={styles.infoButton}>
+                          <MaterialCommunityIcons name="information-outline" size={20} color={colors.text} />
+                          <Text style={styles.infoButtonText}>INFOS</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                </ImageBackground>
+              </TouchableOpacity>
+            );
+          }}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onScroll={onHeroScroll}
+          scrollEventThrottle={16}
+        />
+      )}
+      
+      <View style={styles.heroIndicators}>
+        {featured.map((_, i) => (
+          <View
+            key={i}
+            style={[
+              styles.indicator,
+              i === heroIdx && styles.activeIndicator
+            ]}
+          />
+        ))}
+      </View>
+    </Animated.View>
+  );
+
+  // Rendu du contenu principal
+  const renderContent = () => (
+    <Animated.View
+      style={[
+        styles.contentContainer,
+        {
+          opacity: fadeAnim,
+          transform: [{ translateY: slideAnim }]
+        }
+      ]}
+    >
+      <View style={styles.statsContainer}>
+        <View style={styles.statItem}>
+          <Text style={styles.statNumber}>1.3K+</Text>
+          <Text style={styles.statLabel}>Animes</Text>
+        </View>
+        <View style={styles.statItem}>
+          <Text style={styles.statNumber}>43K+</Text>
+          <Text style={styles.statLabel}>Épisodes</Text>
+        </View>
+        <View style={styles.statItem}>
+          <Text style={styles.statNumber}>24/7</Text>
+          <Text style={styles.statLabel}>Streaming</Text>
+        </View>
+        <View style={styles.statItem}>
+          <Text style={styles.statNumber}>HD</Text>
+          <Text style={styles.statLabel}>Qualité</Text>
+        </View>
+      </View>
+
+      <SectionRow
+        title="En ce moment"
+        data={trending}
+        navigation={navigation}
+        icon="fire"
+        color={colors.epic}
+      />
+      
+      <SectionRow
+        title="Saison actuelle"
+        data={currentSeason}
+        navigation={navigation}
+        icon="calendar-clock"
+        color={colors.success}
+      />
+      
+      <SectionRow
+        title="Mieux notés"
+        data={topRated}
+        navigation={navigation}
+        icon="star"
+        color={colors.premium}
+      />
+      
+      <SectionRow
+        title="Incontournables"
+        data={mustWatch}
+        navigation={navigation}
+        icon="crown"
+        color={colors.legendary}
+      />
+
+      <View style={styles.ctaContainer}>
+        <LinearGradient
+          colors={[colors.accent, colors.secondary]}
+          style={styles.ctaGradient}
+        >
+          <Text style={styles.ctaTitle}>Découvrez encore plus</Text>
+          <Text style={styles.ctaSubtitle}>
+            Explorez notre bibliothèque complète d'animes
+          </Text>
+          <TouchableOpacity
+            style={styles.ctaButton}
+            onPress={() => navigation.navigate('MainTabs', { screen: 'Browse' })}
+          >
+            <Text style={styles.ctaButtonText}>PARCOURIR TOUT</Text>
+            <MaterialIcons name="arrow-forward" size={20} color={colors.background} />
+          </TouchableOpacity>
+        </LinearGradient>
+      </View>
+    </Animated.View>
+  );
+
   if (loading) {
     return (
-      <SafeAreaView style={[styles.container, { alignItems: "center", justifyContent: "center" }] }>
-        <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+      <View style={styles.simpleLoadingContainer}>
+        <StatusBar barStyle="light-content" backgroundColor={colors.background} />
         <ActivityIndicator size="large" color={colors.accent} />
-        <Text style={{ color: colors.textMuted, marginTop: 12 }}>Chargement…</Text>
-      </SafeAreaView>
+      </View>
     );
   }
 
   const allEmpty = !featured.length && !trending.length && !topRated.length && !currentSeason.length && !mustWatch.length;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
-
-      {/* Header */}
-      <View style={styles.headerBar}>
-        <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <View style={styles.logoDot}>
-            <Image source={LogoImage} style={{ width: 24, height: 24, resizeMode: "contain", opacity: 1 }} />
-          </View>
-          <Text style={{ color: "#fff", fontSize: 18, fontWeight: "bold", marginLeft: 8 }}>Shinime</Text>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <TouchableOpacity>
-            <Ionicons name="search-outline" size={22} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Ombre top */}
-      <Animated.View
-        pointerEvents="none"
-        style={{ position: "absolute", top: 0, left: 0, right: 0, height: 180, zIndex: 15, opacity: 1 }}
-      >
-        <LinearGradient
-          colors={["rgba(0,0,0,0.6)", "transparent"]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0, y: 1 }}
-          style={{ flex: 1 }}
-        />
-      </Animated.View>
-
-      {/* Gradient principal derrière header */}
-      <Animated.View
-        pointerEvents="none"
-        style={[
-          styles.headerGradientWrap,
-          {
-            height: 100,
-            opacity: scrollY.interpolate({
-              inputRange: [0, 650],
-              outputRange: [0, 1],
-              extrapolate: "clamp",
-            }),
-          },
-        ]}
-      >
-        <LinearGradient
-          colors={["rgba(0,0,0,0)", "rgba(0,0,0,1)"]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0, y: 0.5 }}
-          style={[styles.headerGradient, { height: 100 }]}
-        />
-      </Animated.View>
-
-      <Animated.ScrollView
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.background} />
+      
+      <ScrollView
+        style={styles.scrollView}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 48 }}
-        onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+          { useNativeDriver: false }
+        )}
         scrollEventThrottle={16}
       >
-        {/* HERO */}
-        {!!featured.length && (
-          <View>
-            <FlatList
-              data={featured}
-              horizontal
-              pagingEnabled
-              ref={heroRef}
-              keyExtractor={(it) => String(it.id)}
-              renderItem={({ item }) => {
-                const rawColor = item.color || item.raw?.coverColor || item.raw?.coverImage?.color || null;
-                const hex = normalizeHex(rawColor) || "#0D1117";
-                const c1 = hexToRgba(hex, 0.18);
-                const c2 = hexToRgba(darkenHex(hex, 35), 0.95);
-                const blurBg = Platform.OS === "android" ? 20 : 14;
-
-                return (
-                  <TouchableOpacity
-                    activeOpacity={0.95}
-                    onPress={() => navigation.navigate("AnimeDetails", { anime: item.raw || item })}
-                  >
-                    <ImageBackground
-                      source={{ uri: item.banner || item.poster }}
-                      style={styles.heroBg}
-                      resizeMode="cover"
-                      blurRadius={blurBg}
-                    >
-                      <BlurView intensity={Platform.OS === "android" ? 55 : 65} tint="dark" style={StyleSheet.absoluteFill} />
-                      <LinearGradient colors={[c1, c2]} start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }} style={StyleSheet.absoluteFill} />
-                      <LinearGradient
-                        colors={["rgba(0,0,0,0)", colors.background]}
-                        start={{ x: 0.5, y: 0 }}
-                        end={{ x: 0.5, y: 0.75 }}
-                        style={styles.bottomHeroGradient}
-                        pointerEvents="none"
-                      />
-                      <View style={styles.heroStack}>
-                        <View style={styles.posterWrap}>
-                          <Image source={{ uri: item.poster }} style={styles.posterImg} resizeMode="cover" />
-                        </View>
-                        <View style={styles.heroTextArea}>
-                          <Text style={styles.heroMeta} numberOfLines={1}>16+ • Doublage | Sous-titres</Text>
-                          <Text style={styles.heroTitle} numberOfLines={1}>{item.title}</Text>
-                          <Text style={styles.heroDesc} numberOfLines={3}>{item.desc}</Text>
-                          <View style={styles.heroActions}>
-                            <TouchableOpacity
-                              style={styles.playBtn}
-                              onPress={() => navigation.navigate("AnimeDetails", { anime: item.raw || item })}
-                            >
-                              <Ionicons name="play" size={18} color="#fff" style={{ marginRight: 8 }} />
-                              <Text style={styles.playBtnText}>COMMENCER À REGARDER S1 E1</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.saveBtn}>
-                              <Ionicons name="bookmark-outline" size={22} color="#fff" />
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      </View>
-                    </ImageBackground>
-                  </TouchableOpacity>
-                );
-              }}
-              onScroll={onHeroScroll}
-              scrollEventThrottle={16}
-              showsHorizontalScrollIndicator={false}
-            />
-          </View>
-        )}
-
-        {/* Segments (dots) */}
-        {!!featured.length && (
-          <View style={styles.heroSegmentsDock}>
-            {featured.map((_, i) => (
-              <View key={`seg-${i}`} style={styles.segmentTrack}>
-                <View style={[styles.segmentFill, { opacity: i === heroIdx ? 1 : 0.35 }]} />
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Message si vraiment rien */}
+        {renderHeroSection()}
+        {renderContent()}
+        
         {allEmpty && (
-          <View style={{ padding: 24, alignItems: "center" }}>
-            <Text style={{ color: "#fff", fontSize: 16, textAlign: "center" }}>
-              Aucun anime à afficher pour le moment. Vérifie ta connexion ou ton catalogue Firestore.
+          <View style={styles.emptyState}>
+            <MaterialCommunityIcons name="wifi-off" size={64} color={colors.textMuted} />
+            <Text style={styles.emptyTitle}>Aucun contenu disponible</Text>
+            <Text style={styles.emptySubtitle}>
+              Vérifiez votre connexion internet ou réessayez plus tard
             </Text>
           </View>
         )}
-
-        {/* Sections */}
-        <SectionRow title="Notre sélection pour vous" data={trending} navigation={navigation} />
-        <SectionRow title="Les mieux notés" data={topRated} navigation={navigation} />
-        <SectionRow title="Nouveautés de la saison" data={currentSeason} navigation={navigation} />
-        <SectionRow title="À ne pas manquer" data={mustWatch} navigation={navigation} />
-
-        {/* Bloc "Voir tout" */}
-        <View style={{ padding: 20, alignItems: "center" }}>
-          <Text style={{ color: "#fff", fontSize: 16, textAlign: "center", marginBottom: 12 }}>
-            Vous cherchez encore quelque chose à regarder ?{"\n"}Découvrez notre bibliothèque complète
-          </Text>
-          <TouchableOpacity
-            onPress={() => navigation.navigate('MainTabs', { screen: 'Browse' })}
-            style={{ backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 24, borderRadius: 8 }}
-          >
-            <Text style={{ color: "#fff", fontWeight: "bold", fontSize: 14 }}>Voir tout</Text>
-          </TouchableOpacity>
-        </View>
-      </Animated.ScrollView>
-    </SafeAreaView>
+      </ScrollView>
+      
+      {renderHeader()}
+    </View>
   );
 }
 
-/* ---------- Styles ---------- */
-const TEXT = { metaLH: 16, titleLH: 32, descLH: 18, descLines: 3 };
-
+/* =========== STYLES ULTRA-AVANCÉS =========== */
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background },
-  headerGradientWrap: { position: "absolute", top: 0, left: 0, right: 0, height: 140, zIndex: 15 },
-  headerGradient: { flex: 1 },
-  headerBar: {
-    position: "absolute",
-    top: Platform.OS === "android" ? 36 : 44,
-    left: 14,
-    right: 14,
-    zIndex: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+  container: {
+    flex: 1,
+    backgroundColor: colors.background,
   },
-  logoDot: { width: 34, height: 34, borderRadius: 34, backgroundColor: "#000000", alignItems: "center", justifyContent: "center" },
-  heroBg: { width: SCREEN_WIDTH, height: SCREEN_HEIGHT * 0.82, justifyContent: "flex-end" },
-  heroStack: { flex: 1, justifyContent: "flex-end", paddingBottom: 10 },
-  posterWrap: {
-    alignSelf: "center",
-    width: SCREEN_WIDTH * 0.72,
-    height: (SCREEN_WIDTH * 0.72) / POSTER_RATIO,
+  
+  scrollView: {
+    flex: 1,
+  },
+  
+  // Particules
+  particleContainer: {
+    position: 'absolute',
+    width: '100%',
+    height: '100%',
+    zIndex: 1,
+  },
+  particle: {
+    position: 'absolute',
+    borderRadius: 50,
+    opacity: 0.6,
+  },
+  
+  // Header
+  headerContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    height: 100,
+  },
+  headerGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 100,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'ios' ? 44 : 30,
+    paddingBottom: 10,
+  },
+  logoContainer: {
+    marginRight: 12,
+  },
+  logoBg: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logo: {
+    width: 20,
+    height: 20,
+    tintColor: colors.background,
+  },
+  headerTitle: {
+    flex: 1,
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.text,
+    marginLeft: 8,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  headerButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surface + '80',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  
+  // Hero Section  
+  heroContainer: {
+    height: SCREEN_HEIGHT * 0.75,
+    position: 'relative',
+  },
+  heroItem: {
+    width: SCREEN_WIDTH,
+    height: '100%',
+  },
+  heroBg: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'flex-end',
+  },
+  heroGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  heroContent: {
+    padding: 20,
+    paddingBottom: 60,
+  },
+  trendingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginBottom: 20,
+    gap: 6,
+  },
+  trendingText: {
+    color: colors.background,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  heroPosterContainer: {
+    alignSelf: 'center',
+    marginBottom: 20,
+    position: 'relative',
+  },
+  heroPoster: {
+    width: SCREEN_WIDTH * 0.4,
+    height: (SCREEN_WIDTH * 0.4) / POSTER_RATIO,
+    borderRadius: 12,
+  },
+  posterBorder: {
+    position: 'absolute',
+    top: -2,
+    left: -2,
+    right: -2,
+    bottom: -2,
     borderRadius: 14,
-    overflow: "hidden",
-    backgroundColor: colors.card,
-    marginTop: 44,
-    elevation: 14,
-    shadowColor: "#000",
-    shadowOpacity: 0.25,
-    shadowOffset: { width: 0, height: 8 },
-    shadowRadius: 14,
+    zIndex: -1,
   },
-  posterImg: { width: "100%", height: "100%" },
-  bottomHeroGradient: { position: "absolute", left: 0, right: 0, bottom: 0, height: 180 },
-  heroTextArea: { paddingHorizontal: 16, paddingTop: 12 },
-  heroMeta: { color: "#e5e5e5", fontSize: 12, lineHeight: TEXT.metaLH, height: TEXT.metaLH, textAlign: "center", marginBottom: 6 },
-  heroTitle: { color: "#fff", fontSize: 28, fontWeight: "bold", lineHeight: TEXT.titleLH, height: TEXT.titleLH, textAlign: "center", marginBottom: 8 },
-  heroDesc: { color: "#ddd", fontSize: 14, lineHeight: TEXT.descLH, height: TEXT.descLH * TEXT.descLines, textAlign: "center", marginBottom: 12 },
-  heroActions: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16 },
-  playBtn: { backgroundColor: colors.accent, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "center", flexGrow: 1 },
-  playBtnText: { color: "#fff", fontWeight: "bold", fontSize: 13 },
-  saveBtn: { marginLeft: 12, width: 48, height: 48, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(255,255,255,0.25)", backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center" },
-  heroSegmentsDock: { flexDirection: "row", justifyContent: "center", alignItems: "center", paddingVertical: 10, backgroundColor: colors.background },
-  segmentTrack: { width: 34, height: 4, borderRadius: 4, overflow: "hidden", backgroundColor: "rgba(244,117,33,0.25)", marginHorizontal: 6 },
-  segmentFill: { width: "100%", height: "100%", backgroundColor: colors.accent },
-  sectionTitle: { color: "#fff", fontSize: 18, fontWeight: "bold", paddingHorizontal: 12, marginBottom: 10 },
-  card: { marginRight: 12, borderRadius: 10, overflow: "hidden", backgroundColor: colors.card, width: Math.round(SCREEN_WIDTH * 0.34) },
-  cardImage: { width: "100%", height: Math.round(SCREEN_WIDTH * 0.34 * (3 / 2)) },
-  cardPlaceholder: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
-  cardTitle: { color: "#eaeaea", fontSize: 12, marginTop: 6, paddingHorizontal: 4, textAlign: "center", height: 40 },
+  heroInfo: {
+    alignItems: 'center',
+  },
+  heroMeta: {
+    marginBottom: 8,
+  },
+  heroMetaText: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  heroTitle: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: colors.text,
+    textAlign: 'center',
+    marginBottom: 12,
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
+  },
+  heroDesc: {
+    fontSize: 14,
+    color: colors.textSecondary || colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+    paddingHorizontal: 20,
+  },
+  heroActions: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  playButton: {
+    flex: 1,
+    backgroundColor: colors.accent,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    elevation: 5,
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  playButtonText: {
+    color: colors.background,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  infoButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  infoButtonText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  heroIndicators: {
+    position: 'absolute',
+    bottom: 20,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  indicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+  activeIndicator: {
+    backgroundColor: colors.accent,
+    width: 20,
+  },
+  
+  // Contenu
+  contentContainer: {
+    paddingTop: 20,
+  },
+  
+  // Stats
+  statsContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    marginBottom: 30,
+    gap: 8,
+  },
+  statItem: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    padding: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  statNumber: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.accent,
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  
+  // Sections
+  sectionContainer: {
+    marginBottom: 32,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginBottom: 16,
+  },
+  sectionTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sectionIcon: {
+    marginRight: 8,
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  seeAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  seeAllText: {
+    color: colors.textMuted,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  sectionList: {
+    paddingHorizontal: 20,
+  },
+  
+  // Cartes
+  cardContainer: {
+    marginBottom: 8,
+  },
+  card: {
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    overflow: 'hidden',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  cardImageContainer: {
+    position: 'relative',
+  },
+  cardImage: {
+    width: '100%',
+    height: 160,
+    resizeMode: 'cover',
+  },
+  cardPlaceholder: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  cardGradient: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 60,
+  },
+  cardBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  playIconContainer: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardContent: {
+    padding: 12,
+  },
+  cardTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.text,
+    marginBottom: 6,
+    lineHeight: 18,
+  },
+  cardMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  ratingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ratingText: {
+    fontSize: 12,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  genreText: {
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+  
+  // CTA
+  ctaContainer: {
+    marginHorizontal: 20,
+    marginVertical: 40,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  ctaGradient: {
+    padding: 32,
+    alignItems: 'center',
+  },
+  ctaTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: colors.background,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  ctaSubtitle: {
+    fontSize: 14,
+    color: colors.background + 'CC',
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  ctaButton: {
+    backgroundColor: colors.background,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  ctaButtonText: {
+    color: colors.accent,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  
+  // Empty State
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 40,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: colors.text,
+    marginTop: 20,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  posterBlur: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 12,
+  },
+  simpleLoadingContainer: {
+    flex: 1,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });

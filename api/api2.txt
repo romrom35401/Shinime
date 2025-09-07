@@ -1,0 +1,1194 @@
+const ANILIST_API = 'https://graphql.anilist.co';
+const JIKAN_API = 'https://api.jikan.moe/v4';
+
+// ===== Firebase (v9 modulaire) =====
+import {
+  collection,
+  getDocs,
+  query,
+  where,
+  limit as qLimit,
+  orderBy,
+  doc,
+  getDoc,
+} from "firebase/firestore";
+import { db } from "./firebaseConfig";
+
+// ====== Réglages ======
+const bannedGenres = ["Hentai", "Doujin", "Experimental", "Special", "Erotica"];
+const bannedWords = [
+  "hentai", "doujin", "nsfw",
+  "haha", "no te", "musume", "kami", "omake", "one te", "oneshot",
+  "music video", "pv", "promo", "commercial"
+];
+const allowedFormats = new Set(["TV", "TV_SHORT", "ONA"]);
+const remakeTags = [
+  "brotherhood", "shippuuden", "kai", "crystal", "z", "super",
+  "after story", "next generations", "2011", "1999", "2020", "remake"
+];
+// AniList rate-limiting + retry helpers (module-scope)
+let __anilistLastCallAt = 0;
+const ANILIST_MIN_INTERVAL_MS = 1200; // space requests by ~1.2s globally
+const ANILIST_MAX_RETRIES = 4;
+let __anilistInjectorRunning = false;
+
+async function _anilistWaitIfNeeded() {
+  const now = Date.now();
+  const since = now - __anilistLastCallAt;
+  const wait = Math.max(0, ANILIST_MIN_INTERVAL_MS - since);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait + Math.floor(Math.random() * 200)));
+}
+
+// ====== SYSTÈME DE RATE LIMITING POUR JIKAN ======
+class JikanRateLimiter {
+  constructor() {
+    this.lastRequest = 0;
+    this.minDelay = 600; // 600ms entre chaque requête (environ 1.6 req/s)
+    this.requestQueue = [];
+    this.processing = false;
+  }
+
+  async makeRequest(url) {
+    return new Promise((resolve, reject) => {
+      this.requestQueue.push({ url, resolve, reject });
+      this.processQueue();
+    });
+  }
+
+  async processQueue() {
+    if (this.processing || this.requestQueue.length === 0) return;
+    
+    this.processing = true;
+    
+    while (this.requestQueue.length > 0) {
+      const { url, resolve, reject } = this.requestQueue.shift();
+      
+      try {
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequest;
+        
+        if (timeSinceLastRequest < this.minDelay) {
+          await new Promise(res => setTimeout(res, this.minDelay - timeSinceLastRequest));
+        }
+        
+        console.log(`Making Jikan request to: ${url}`);
+        const response = await fetch(url);
+        this.lastRequest = Date.now();
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        resolve(data);
+      } catch (error) {
+        console.error(`Jikan API Error for ${url}:`, error);
+        reject(error);
+      }
+    }
+    
+    this.processing = false;
+  }
+}
+
+const jikanLimiter = new JikanRateLimiter();
+
+function cleanBaseTitle(str) {
+  if (typeof str !== 'string') return '';
+  if (!str) return str;
+  let cleaned = str.replace(/\s*\(\d{4}\)\s*$/, '');
+  cleaned = cleaned.replace(/\b(2011|1999|brotherhood|crystal|z|kai|super|remake|next generations)\b/gi, '');
+  cleaned = cleaned
+    .replace(/\b(saison|season|partie|part|cour|cours|arc)\s*\d+\b/gi, '')
+    .replace(/\b(season|saison|part|cour|cours)[\s\-_]*\d+\b/gi, '')
+    .replace(/\b(tv|ova|special|movie|film|ona)\b/gi, '')
+    .replace(/\b(\d+)(st|nd|rd|th)?\s*(season|saison|part|cour|cours)?\b/gi, '')
+    .replace(/\b(i{1,3}|iv|v|vi{0,3}|x)\b(?=\s|$)/gi, '');
+  cleaned = cleaned.replace(/[\(\)\[\]]+/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.replace(/\s{2,}/g, ' ').trim();
+}
+
+// ====== Descriptions ======
+const FR_DESC_PLACEHOLDER = "Synopsis en français indisponible.";
+
+// Import des IDs Anime-Sama depuis un fichier externe
+const ANIME_SAMA_IDS = require('./animeSamaIds');
+
+// ========== NOUVEAU SYSTÈME DE MATCHING FUZZY ==========
+// Mots vides à ignorer lors du matching
+const STOPWORDS = new Set([
+  // EN
+  "the","a","an","of","and","or","to","in","on","for","with","from","at","by","is","are","be","as",
+  "part","season","movie","film","ova","special","episode","episodes","chapter","chapters",
+  // FR
+  "le","la","les","de","des","du","d","un","une","au","aux","et","ou","dans","sur","pour","avec","par",
+  "partie","saison","lequel","laquelle","l","aux",
+  // JP romanisé
+  "no","to","wa","ga","wo","o","ni","de","e","kara","made"
+]);
+
+// Conversions chiffres FR/EN -> nombres
+const WORD_NUM = new Map(Object.entries({
+  // EN
+  "zero":0,"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,
+  "eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,"twenty":20,
+  // FR
+  "zéro":0,"zero":0,"un":1,"une":1,"deux":2,"trois":3,"quatre":4,"cinq":5,"six":6,"sept":7,"huit":8,"neuf":9,"dix":10,
+  "onze":11,"douze":12,"treize":13,"quatorze":14,"quinze":15,"seize":16,"dix-sept":17,"dix-huit":18,"dix-neuf":19,"vingt":20
+}));
+
+const ALIAS_MAP = {
+  "attack on titan": ["shingeki no kyojin","attaque des titans"],
+  "demon slayer": ["kimetsu no yaiba"],
+  "my hero academia": ["boku no hero academia","boku no hiro academia","heroaca"],
+  "frieren": ["sousou no frieren"],
+  "that time i got reincarnated as a slime": ["tensei shitara slime datta ken"],
+  "the quintessential quintuplets": ["go-toubun no hanayome","5-toubun no hanayome","5toubun no hanayome","quintessential quintuplets"],
+  "a silent voice": ["koe no katachi"],
+  "your name": ["kimi no na wa"],
+  "weathering with you": ["tenki no ko"],
+  "rascal does not dream of bunny girl senpai": ["seishun buta yarou","ao haru bunny girl senpai"],
+  "kobayashi's dragon maid": ["kobayashi san chi no maid dragon","kobayashi no maid dragon","maid dragon","kobayashis dragon maid"],
+  "kaguya-sama love is war": ["kaguya-sama","kaguya sama love is war"],
+  "classroom of the elite": ["youkoso jitsuryoku shijou shugi no kyoushitsu e","youkoso classroom of the elite"],
+  "rent a girlfriend": ["kanojo okarishimasu","kanokari"],
+  "oshi no ko": ["my star"],
+  "haikyuu": ["haikyu","haikyu!!"],
+  "evangelion": ["neon genesis evangelion","nge"],
+  "blue exorcist": ["ao no exorcist"],
+  "tengoku daimakyou": ["heaven's delusion","heavens delusion"],
+  "the rising of the shield hero": ["tate no yuusha no nariagari"],
+  "violet evergarden": ["violet-evergarden"],
+  "chainsaw man": ["chainsaw-man"],
+  "mushoku tensei": ["jobless reincarnation"],
+  "jujutsu kaisen": ["jjk"],
+  "bocchi the rock": ["bocchi-the-rock"],
+  "spy x family": ["spy family","spy×family","spy xfamily"],
+};
+
+function stripDiacritics(str) {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function toAsciiLower(str) {
+  return stripDiacritics(str)
+    .replace(/[''`]/g, "'")
+    .replace(/[×✕✖]/g, "x")
+    .replace(/&/g, " and ")
+    .toLowerCase();
+}
+
+function slugify(str) {
+  return toAsciiLower(str)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-");
+}
+
+function splitTokens(str) {
+  return slugify(str)
+    .split(/[-\s]+/)
+    .filter(Boolean)
+    .filter(t => !STOPWORDS.has(t));
+}
+
+function romanToInt(tok) {
+  const map = {i:1,v:5,x:10,l:50,c:100,d:500,m:1000};
+  let s = tok.toLowerCase();
+  if (!/^[ivxlcdm]+$/.test(s)) return null;
+  let total=0, prev=0;
+  for (let i=s.length-1;i>=0;i--) {
+    const val = map[s[i]];
+    if (val < prev) total -= val;
+    else total += val;
+    prev = val;
+  }
+  return total;
+}
+
+function normalizeTokens(tokens) {
+  const out = [];
+  for (let tok of tokens) {
+    if (WORD_NUM.has(tok)) {
+      out.push(String(WORD_NUM.get(tok)));
+      continue;
+    }
+    const r = romanToInt(tok);
+    if (r !== null) {
+      out.push(String(r));
+      continue;
+    }
+    out.push(tok);
+  }
+  return out;
+}
+
+function keyFromTokens(tokens) {
+  return tokens.join("-");
+}
+
+function levenshteinRatio(a, b) {
+  if (a === b) return 100;
+  const m = a.length, n = b.length;
+  if (m === 0 || n === 0) return 0;
+  const dp = Array.from({length: m+1}, () => new Array(n+1).fill(0));
+  for (let i=0;i<=m;i++) dp[i][0]=i;
+  for (let j=0;j<=n;j++) dp[0][j]=j;
+  for (let i=1;i<=m;i++) {
+    const ca = a.charCodeAt(i-1);
+    for (let j=1;j<=n;j++) {
+      const cb = b.charCodeAt(j-1);
+      const cost = (ca===cb) ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i-1][j] + 1,
+        dp[i][j-1] + 1,
+        dp[i-1][j-1] + cost
+      );
+    }
+  }
+
+  const dist = dp[m][n];
+  const maxLen = Math.max(m,n);
+  return Math.round((1 - dist / maxLen) * 100);
+}
+
+function tokenSetScore(aTokens, bTokens) {
+  const A = new Set(aTokens), B = new Set(bTokens);
+  const inter = new Set([...A].filter(x => B.has(x)));
+  const prec = inter.size / Math.max(1, A.size);
+  const rec  = inter.size / Math.max(1, B.size);
+  const f1 = (prec+rec) ? (2*prec*rec)/(prec+rec) : 0;
+  return Math.round(f1 * 100);
+}
+
+function generateAliases(title) {
+  const base = toAsciiLower(title).trim();
+
+  const cutNoise = base
+    .replace(/\b(saison|season|partie|part|cour|arc)\s*\d+\b/gi, "")
+    .replace(/\b(tv|movie|film|ova|special)\b/gi, "");
+  const seeds = new Set([base, cutNoise, slugify(base), slugify(cutNoise)]);
+
+  const pairs = [];
+  for (const [main, alts] of Object.entries(ALIAS_MAP)) {
+    pairs.push([main, main]);
+    for (const a of alts) pairs.push([main, a]);
+  }
+
+  const bidir = new Map();
+  for (const [main, phrase] of pairs) {
+    bidir.set(slugify(phrase), slugify(main));
+    bidir.set(toAsciiLower(phrase), slugify(main));
+  }
+
+  for (const s of Array.from(seeds)) {
+    const slug = slugify(s);
+    for (const [phraseSlug, mainSlug] of bidir.entries()) {
+      if (slug.includes(phraseSlug)) {
+        seeds.add(slug.replace(phraseSlug, mainSlug));
+      }
+    }
+  }
+
+  const repls = [
+    [/spyx?family/g, "spy x family"],
+    [/bunny[-\s]?girl[-\s]?senpai/g, "bunny girl senpai"],
+    [/kimetsu[-\s]?no[-\s]?yaiba/g, "demon slayer"],
+    [/shingeki[-\s]?no[-\s]?kyojin/g, "attack on titan"],
+    [/kobayashi(.{0,3})maid(.{0,3})dragon/g, "kobayashi's dragon maid"],
+    [/tensei(.{0,6})slime(.{0,6})datta(.{0,6})ken/g, "that time i got reincarnated as a slime"],
+    [/seishun(.{0,6})buta(.{0,6})yarou/g, "rascal does not dream of bunny girl senpai"],
+    [/tate(.{0,6})yuusha(.{0,6})nariagari/g, "the rising of the shield hero"],
+  ];
+  for (const r of repls) {
+    for (const s of Array.from(seeds)) {
+      const t = toAsciiLower(s).replace(r[0], r[1]);
+      seeds.add(slugify(t));
+    }
+  }
+
+  const out = new Set();
+  for (const s of seeds) {
+    const toks = normalizeTokens(splitTokens(s));
+    if (toks.length) out.add(keyFromTokens(toks));
+  }
+  return Array.from(out);
+}
+
+const ANIME_SAMA_INDEX = ANIME_SAMA_IDS.map(id => {
+  const tokens = normalizeTokens(splitTokens(id));
+  return {
+    id,
+    tokens,
+    key: keyFromTokens(tokens),
+    starts: tokens[0] || ""
+  };
+});
+
+function scoreAgainst(aliasKey, aliasTokens, candidate) {
+  const tokenScore = tokenSetScore(aliasTokens, candidate.tokens);
+  const levScore   = levenshteinRatio(aliasKey, candidate.key);
+  let score = Math.round(0.6*tokenScore + 0.4*levScore);
+  if (candidate.key === aliasKey) score += 25;
+  if (candidate.key.startsWith(aliasKey) || aliasKey.startsWith(candidate.key)) score += 10;
+  if (candidate.id.includes(aliasKey)) score += 5;
+  if (score > 100) score = 100;
+  return { score, tokenScore, levScore };
+}
+
+function findBestAnimeSamaMatch(title, { minScore = 60, limit = 1 } = {}) {
+  if (!title) return null;
+  const aliases = generateAliases(title);
+  const results = [];
+
+  for (const aliasKey of aliases) {
+    const aliasTokens = aliasKey.split('-');
+    for (const cand of ANIME_SAMA_INDEX) {
+      if (aliasTokens[0] && cand.starts && aliasTokens[0][0] !== cand.starts[0]) {
+        if (aliasTokens[0].length > 1) {
+          const a0 = aliasTokens[0][0], c0 = cand.starts[0];
+          const isNum = (x)=> x >= '0' && x <= '9';
+          if (!(isNum(a0) && isNum(c0))) continue;
+        } else {
+          continue;
+        }
+      }
+
+      const { score } = scoreAgainst(aliasKey, aliasTokens, cand);
+      if (score >= minScore) {
+        results.push({
+          id: cand.id,
+          score,
+          method: 'fuzzy',
+          detail: {
+            searchAlias: aliasKey,
+            matchedKey: cand.key
+          }
+        });
+      }
+    }
+  }
+
+  results.sort((a,b) => b.score - a.score);
+  const unique = [];
+  const seen = new Set();
+  for (const res of results) {
+    if (!seen.has(res.id)) {
+      seen.add(res.id);
+      unique.push(res);
+    }
+  }
+
+  return limit === 1 ? (unique[0] || null) : unique.slice(0, limit);
+}
+
+function findAnimeSamaCandidates(title, { limit = 5, minScore = 50 } = {}) {
+  return findBestAnimeSamaMatch(title, { minScore, limit }) || [];
+}
+
+function testMatching() {
+  const testTitles = [
+    "Hunter x Hunter",
+    "Jujutsu Kaisen",
+    "Attack on Titan",
+    "Demon Slayer",
+    "One Piece",
+    "Frieren",
+    "Spy x Family",
+    "Bunny Girl Senpai",
+    "Kobayashi's Dragon Maid",
+    "The Quintessential Quintuplets",
+    "Kaguya-sama: Love is War",
+    "Classroom of the elite",
+    "Rent-A-Girlfriend",
+    "Oshi no Ko",
+    "Haikyuu!!",
+    "Blue Exorcist",
+    "Heavenly Delusion",
+    "Violet Evergarden",
+    "Chainsaw Man",
+    "Mushoku Tensei: Jobless Reincarnation",
+    "Bocchi the Rock!"
+  ];
+
+  console.log("Tests de correspondance avec le système fuzzy :");
+  testTitles.forEach(title => {
+    const match = findBestAnimeSamaMatch(title);
+    const candidates = findAnimeSamaCandidates(title, { limit: 3 });
+
+    console.log(`\n"${title}"`);
+    console.log(`  Meilleur match: ${match ? `${match.id} (score: ${match.score})` : 'Aucun match'}`);
+    console.log(`  Candidats:`, candidates.map(c => `${c.id} (${c.score})`));
+  });
+}
+
+// ========== ANILIST IMAGE FETCHING WITH BETTER ERROR HANDLING ==========
+async function fetchAniListImagesByTitle(title) {
+  if (!title) return null;
+  
+  const query = `
+    query ($search: String) {
+      Media(search: $search, type: ANIME) {
+        id
+        coverImage {
+          extraLarge
+          large
+          medium
+          color
+        }
+        bannerImage
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(ANILIST_API, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        query,
+        variables: { search: title }
+      })
+    });
+
+    if (!response.ok) {
+      console.warn(`AniList API error: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    
+    if (data.errors) {
+      console.warn('AniList GraphQL errors:', data.errors);
+      return null;
+    }
+    
+    const media = data?.data?.Media;
+    
+    if (media && media.coverImage) {
+      return {
+        poster: media.coverImage.extraLarge || media.coverImage.large || media.coverImage.medium || null,
+        banner: media.bannerImage || null,
+        color: media.coverImage.color || null
+      };
+    }
+  } catch (error) {
+    console.warn('Error fetching AniList images by title:', error.message);
+  }
+  
+  return null;
+}
+
+async function fetchAniListImagesByMalId(malId) {
+  if (!malId) return null;
+
+  const query = `
+    query ($malId: Int) {
+      Media(idMal: $malId, type: ANIME) {
+        id
+        coverImage {
+          extraLarge
+          large
+          medium
+          color
+        }
+        bannerImage
+      }
+    }
+  `;
+
+  for (let attempt = 0; attempt < ANILIST_MAX_RETRIES; attempt++) {
+    try {
+      await _anilistWaitIfNeeded();
+      const response = await fetch(ANILIST_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ query, variables: { malId: parseInt(malId) } })
+      });
+
+      __anilistLastCallAt = Date.now();
+
+      if (response.status === 429) {
+        const backoff = 500 * Math.pow(2, attempt) + Math.random() * 300;
+        console.warn(`AniList 429 (malId=${malId}) — backing off ${Math.round(backoff)}ms (attempt ${attempt + 1})`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+
+      if (!response.ok) {
+        console.warn(`AniList API error for MAL ID ${malId}: ${response.status}`);
+        return null;
+      }
+
+      const data = await response.json();
+      if (data.errors) {
+        console.warn('AniList GraphQL errors for MAL ID:', malId, data.errors);
+        return null;
+      }
+
+      const media = data?.data?.Media;
+      if (media && media.coverImage) {
+        return {
+          poster: media.coverImage.extraLarge || media.coverImage.large || media.coverImage.medium || null,
+          banner: media.bannerImage || null,
+          color: media.coverImage.color || null
+        };
+      }
+
+      return null;
+    } catch (err) {
+      const backoff = 500 * Math.pow(2, attempt) + Math.random() * 300;
+      console.warn(`Error fetching AniList images by MAL ID ${malId}: ${err?.message || err} — retrying in ${Math.round(backoff)}ms`);
+      await new Promise(r => setTimeout(r, backoff));
+    }
+  }
+
+  // exhausted retries
+  return null;
+}
+
+
+function getBestImageUrl(coverImage, bannerImage) {
+  return {
+    poster: coverImage?.extraLarge || coverImage?.large || coverImage?.medium || 'https://via.placeholder.com/300x450/1a1a1a/ffffff?text=No+Image',
+    banner: bannerImage || coverImage?.extraLarge || 'https://via.placeholder.com/1200x300/1a1a1a/ffffff?text=No+Banner',
+    color: coverImage?.color || null
+  };
+}
+
+function pickTitle(anime) {
+  if (typeof anime?.title === 'string') return anime.title || "Sans titre";
+  return anime?.title?.english || anime?.title?.romaji || anime?.title?.native || anime?.title || "Sans titre";
+}
+
+function isAcceptableAnime(anime) {
+  const format = anime?.format || anime?.type;
+  const isAdult = anime?.rating === 'Rx - Hentai' || anime?.genres?.some(g => bannedGenres.includes(g.name));
+  if (isAdult) return false;
+  
+  const genres = anime?.genres ? anime.genres.map(g => g.name || g) : [];
+  if (genres.some(g => bannedGenres.includes(g))) return false;
+  
+  const titlesPool = [
+    pickTitle(anime),
+    anime?.title_english,
+    anime?.title_japanese,
+    ...(anime?.title_synonyms || []),
+    ...(anime?.synonyms || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+  
+  if (bannedWords.some(w => titlesPool.includes(w))) return false;
+  
+  const score = anime?.score || (anime?.averageScore / 10);
+  if (typeof score === "number" && score < 6.0) return false;
+
+  return true;
+}
+
+// ========== JIKAN API FUNCTIONS AVEC ENDPOINTS CORRIGÉS ==========
+// ---------- remplacement: fetchJikanGroupedAnimes + groupJikanAnimeByFranchise ----------
+async function fetchJikanGroupedAnimes(endpoint, limit = 8, options = { useAniList: true }) {
+  try {
+    // limiter la page fetching pour éviter gros burst
+    const fetchLimit = Math.min(limit, 12);
+    const url = `${JIKAN_API}/${endpoint}?limit=${fetchLimit}`;
+    console.log(`Fetching from Jikan: ${url}`);
+
+    const data = await jikanLimiter.makeRequest(url);
+    const animes = data?.data || [];
+
+    // filtrage local (ton isAcceptableAnime existant)
+    const filtered = animes.filter(isAcceptableAnime);
+
+    // grouper localement par titre normalisé (aucune requête additionnelle)
+    const grouped = await groupJikanAnimeByFranchise(filtered);
+
+    // trier par popularité / score pour donner priorité
+    grouped.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+
+    // slice final selon la limite demandée
+    const final = grouped.slice(0, limit);
+
+    // inject descriptions + images UNIQUEMENT pour l'ensemble final (réduit les appels AniList)
+    await injectDescriptionsFromFirebase(final);
+
+    if (options.useAniList) {
+      await injectAniListImagesWithThrottling(final);
+    }
+
+    return final;
+  } catch (error) {
+    console.error('Jikan API Error:', error);
+    return [];
+  }
+}
+
+/**
+ * groupJikanAnimeByFranchise
+ * - regroupe un tableau Jikan localement en buckets sur la base d'un titre normalisé
+ * - ne fait PAS d'appels réseau supplémentaires
+ */
+function groupJikanAnimeByFranchise(animes = []) {
+  const buckets = new Map();
+
+  for (const anime of animes) {
+    // rassembler variantes de titres potentielles
+    const variants = [
+      anime.title,
+      anime.title_english,
+      anime.title_japanese,
+      ...(anime.title_synonyms || []),
+      ...(anime.synonyms || []),
+      ...(anime.titles ? Object.values(anime.titles).map(v => (typeof v === 'string' ? v : v?.title)) : []),
+    ].filter(Boolean).map(v => String(v));
+
+    // essayer de produire une clé normalisée à partir d'une des variantes
+    let normalizedKey = "";
+    for (const v of variants) {
+      const key = collapseNormalizedKey(normalizeTitleForSeasonKey(String(v)));
+      if (key) { normalizedKey = key; break; }
+    }
+
+    // fallback si on n'a rien trouvé (évite d'écraser)
+    if (!normalizedKey) normalizedKey = `mal-${anime.mal_id}`;
+
+    if (!buckets.has(normalizedKey)) buckets.set(normalizedKey, []);
+    buckets.get(normalizedKey).push(anime);
+  }
+
+  // construire les groupes finaux en choisissant un représentant (meilleur score / TV / plus ancien)
+  const results = [];
+  for (const [normKey, list] of buckets.entries()) {
+    // pickBestRepresentative existe déjà dans ton fichier et fonctionne sur les objets Jikan
+    const rep = pickBestRepresentative(list) || list[0];
+
+    results.push({
+      id: `JK-${rep.mal_id}-${normKey}`,
+      sourceId: rep.mal_id,
+      source: 'jikan',
+      normalizedBase: normalizeDisplayTitle(normKey),
+      normalizedKey: normKey,
+      title: rep.title || rep.title_english || rep.title_japanese || "Untitled",
+      title_en: rep.title_english || rep.title || null,
+      title_romaji: rep.title || rep.title_romaji || null,
+      description: rep.synopsis || rep.description || FR_DESC_PLACEHOLDER,
+      posterImage: rep.images?.jpg?.large_image_url || rep.images?.jpg?.image_url || null,
+      bannerImage: null,
+      coverImage: rep.images?.jpg?.large_image_url || rep.images?.jpg?.image_url || null,
+      format: rep.type || rep.format,
+      genres: (rep.genres || []).map(g => (g && g.name) ? g.name : g),
+      averageScore: rep.score ? rep.score * 10 : null,
+      popularity: rep.popularity || 0,
+      animeSamaMatch: findBestAnimeSamaMatch(rep.title || rep.title_english || ""),
+      franchiseCount: list.length,
+      variants: list.map(x => ({ mal_id: x.mal_id, title: x.title, title_english: x.title_english })),
+      _jikanData: rep
+    });
+  }
+
+  return results;
+}
+
+
+// Version simplifiée sans requêtes supplémentaires pour les relations
+async function buildFranchiseFromJikan(anime, processedIds) {
+  // Pour éviter les erreurs 429, on ne fait plus de requêtes supplémentaires
+  // On retourne juste l'anime de base
+  return [anime];
+}
+
+function pickBestRepresentative(franchise) {
+  return franchise.sort((a, b) => {
+    // Prioritize TV series
+    if (a.type === 'TV' && b.type !== 'TV') return -1;
+    if (b.type === 'TV' && a.type !== 'TV') return 1;
+    
+    // Then by year (earliest first)
+    const aYear = a.year || a.aired?.from ? new Date(a.aired.from).getFullYear() : 9999;
+    const bYear = b.year || b.aired?.from ? new Date(b.aired.from).getFullYear() : 9999;
+    if (aYear !== bYear) return aYear - bYear;
+    
+    // Finally by score
+    return (b.score || 0) - (a.score || 0);
+  })[0];
+}
+
+// Version avec throttling pour AniList
+async function injectAniListImagesWithThrottling(animes = []) {
+  // Prevent concurrent injectors from running at once
+  while (__anilistInjectorRunning) {
+    await new Promise(r => setTimeout(r, 200)); // wait for the other injector to finish
+  }
+  __anilistInjectorRunning = true;
+
+  try {
+    for (let i = 0; i < animes.length; i++) {
+      const anime = animes[i];
+      try {
+        // Try MAL first (with retries/backoff in the function)
+        let images = await fetchAniListImagesByMalId(anime.sourceId);
+
+        // Fallback to title search if MAL fails
+        if (!images) {
+          images = await fetchAniListImagesByTitle(anime.title || anime.title_en || anime.title_romaji || anime.normalizedBase || "");
+        }
+
+        if (images) {
+          if (images.poster) anime.posterImage = images.poster;
+          if (images.banner) anime.bannerImage = images.banner;
+          if (images.color) anime.coverColor = images.color;
+          anime.coverImage = images.poster || anime.coverImage;
+        }
+
+        // spacing after each successful/failed AniList call (global last-call already enforced)
+        await new Promise(resolve => setTimeout(resolve, 700));
+      } catch (error) {
+        console.warn('Failed to inject AniList images for:', anime.title, error);
+        // small spacing to avoid immediate next attempt
+        await new Promise(resolve => setTimeout(resolve, 700));
+      }
+    }
+  } finally {
+    __anilistInjectorRunning = false;
+  }
+}
+
+// Version originale gardée pour compatibilité
+async function injectAniListImages(animes) {
+  return injectAniListImagesWithThrottling(animes);
+}
+
+const firebaseDescCache = new Map();
+
+function pickDocDescription(docData) {
+  return (
+    docData?.description ||
+    docData?.synopsis ||
+    docData?.synopsys ||
+    docData?.resume || null
+  );
+}
+
+function buildIdCandidatesFromTitles(titles = []) {
+  const ids = new Set();
+  titles.filter(Boolean).forEach(t => {
+    const slug = collapseNormalizedKey(normalizeTitleForSeasonKey(t));
+    if (slug) {
+      ids.add(slug);
+    }
+  });
+  return Array.from(ids);
+}
+
+async function tryGetDocByIds(idCandidates = [], collectionName = "animes") {
+  for (const id of idCandidates) {
+    try {
+      const snap = await getDoc(doc(db, collectionName, id));
+      if (snap.exists()) {
+        return { id: snap.id, ...snap.data() };
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function getFirstDoc(q) {
+  const snap = await getDocs(q);
+  return snap.docs[0] ? { id: snap.docs[0].id, ...snap.docs[0].data() } : null;
+}
+
+async function fetchFirebaseDocByTitles(titles = [], collectionName = "animes") {
+  if (!titles.length) return null;
+
+  const variants = titles.filter(Boolean);
+  const normed = variants.map(normalizeTitleForSeasonKey).filter(Boolean);
+
+  for (let i = 0; i < normed.length; i += 10) {
+    const part = normed.slice(i, i + 10);
+    try {
+      const q = query(collection(db, collectionName), where("normalized", "in", part), qLimit(1));
+      const first = await getFirstDoc(q);
+      if (first) return first;
+    } catch (_) {}
+  }
+
+  for (let i = 0; i < variants.length; i += 10) {
+    const part = variants.slice(i, i + 10);
+    try {
+      const q2 = query(collection(db, collectionName), where("titlesAll", "array-contains-any", part), qLimit(1));
+      const first2 = await getFirstDoc(q2);
+      if (first2) return first2;
+    } catch (_) {}
+  }
+
+  if (normed.length) {
+    try {
+      const regexCandidates = normed.map(n => new RegExp("^" + n.replace(/-/g, "[- ]?") + "$", "i"));
+      const snap = await getDocs(query(collection(db, collectionName), qLimit(250)));
+      for (const d of snap.docs) {
+        const norm = d.data().normalized || d.id;
+        if (regexCandidates.some(rx => rx.test(norm))) {
+          return { id: d.id, ...d.data() };
+        }
+      }
+    } catch (_) {}
+  }
+
+  const idCandidates = buildIdCandidatesFromTitles(variants);
+  if (idCandidates.length) {
+    try {
+      return await tryGetDocByIds(idCandidates, collectionName);
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+async function injectDescriptionsFromFirebase(items = []) {
+  await Promise.all(items.map(async (item) => {
+    const titles = [
+      item.title,
+      item.title_en,
+      item.title_romaji,
+      ...(item.synonyms || []),
+      ...(item.title_variants || []),
+    ].filter(Boolean);
+
+    if (titles.length === 0) return;
+
+    const docData = await fetchFirebaseDocByTitles(titles);
+    if (docData) {
+      const frDesc = pickDocDescription(docData);
+
+      if (frDesc) {
+        item.description = frDesc;
+      }
+      item._matchedDocId = docData.id;
+    }
+  }));
+}
+
+// ========== MAIN EXPORT FUNCTIONS AVEC ENDPOINTS CORRIGÉS ==========
+
+export async function fetchTrendingGrouped(limit = 8) {
+  // Endpoint corrigé pour les tendances
+  return fetchJikanGroupedAnimes('top/anime', limit);
+}
+
+export async function fetchTopRatedGrouped(limit = 8) {
+  // Endpoint corrigé pour le top rated
+  return fetchJikanGroupedAnimes('top/anime?type=tv&order_by=score', limit);
+}
+
+export async function fetchCurrentSeasonGrouped(limit = 8) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  let season;
+  if (month >= 1 && month <= 3) season = "winter";
+  else if (month >= 4 && month <= 6) season = "spring";
+  else if (month >= 7 && month <= 9) season = "summer";
+  else season = "fall";
+  
+  // Endpoint corrigé pour la saison actuelle
+  return fetchJikanGroupedAnimes(`seasons/${year}/${season}`, limit);
+}
+
+export async function fetchFeaturedJikan(limit = 8) {
+  // Endpoint corrigé pour les favoris
+  return fetchJikanGroupedAnimes('top/anime?type=tv&order_by=favorites', limit);
+}
+
+export async function fetchMustWatch(limit = 8) {
+  // Endpoint corrigé pour les animes en cours
+  return fetchJikanGroupedAnimes('seasons/now', limit);
+}
+
+export async function fetchAnimes(limit = 30) {
+  try {
+    let snap;
+    try {
+      const qRef = query(collection(db, "animes"), orderBy("popularity", "desc"), qLimit(limit * 2));
+      snap = await getDocs(qRef);
+    } catch {
+      const qRef = query(collection(db, "animes"), qLimit(limit * 2));
+      snap = await getDocs(qRef);
+    }
+    const items = [];
+    snap.forEach(doc => items.push(mapAnimeDocToCard(doc.id, doc.data())));
+    const byKey = new Map();
+    for (const it of items) {
+      const key = normalizeTitleForSeasonKey(it.title);
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(it);
+    }
+    const deduped = Array.from(byKey.values()).map(pickBaseFromFranchise);
+    await injectDescriptionsFromFirebase(deduped);
+    return deduped.slice(0, limit);
+  } catch (e) {
+    console.error("fetchAnimes error:", e?.message);
+    return [];
+  }
+}
+
+const DETAILS_COLLECTION = "animesDetails";
+
+export async function fetchEpisodesByTitle(titleOrAnime, options = { grouped: false }) {
+  try {
+    const titleVariants = [];
+    if (typeof titleOrAnime === "string") {
+      titleVariants.push(titleOrAnime);
+    } else if (titleOrAnime && typeof titleOrAnime === "object") {
+      titleVariants.push(
+        titleOrAnime.title,
+        titleOrAnime.title_en,
+        titleOrAnime.title_romaji,
+        titleOrAnime.sourceId,
+        titleOrAnime.source_id,
+        titleOrAnime.id,
+        ...(Array.isArray(titleOrAnime.title_variants) ? titleOrAnime.title_variants : [])
+      );
+    }
+    const variants = Array.from(new Set(titleVariants.filter(Boolean)));
+    if (!variants.length) return options.grouped ? { grouped: [], flat: [] } : [];
+    const colRef = collection(db, DETAILS_COLLECTION);
+    const normed = variants.map(normalizeTitleForSeasonKey).filter(Boolean);
+    let detailsDoc = null;
+    for (let i = 0; i < normed.length && !detailsDoc; i += 10) {
+      const part = normed.slice(i, i + 10);
+      try {
+        const q = query(colRef, where("normalized", "in", part), qLimit(1));
+        const first = await getFirstDoc(q);
+        if (first) { detailsDoc = first; break; }
+      } catch (_) {}
+    }
+    for (let i = 0; i < variants.length && !detailsDoc; i += 10) {
+      const part = variants.slice(i, i + 10);
+      try {
+        const q2 = query(colRef, where("titlesAll", "array-contains-any", part), qLimit(1));
+        const first2 = await getFirstDoc(q2);
+        if (first2) { detailsDoc = first2; break; }
+      } catch (_) {}
+    }
+    if (!detailsDoc && normed.length) {
+      try {
+        const regexCandidates = normed.map(n => new RegExp("^" + n.replace(/-/g, "[- ]?") + "$", "i"));
+        const snap = await getDocs(query(colRef, qLimit(250)));
+        for (const d of snap.docs) {
+          const norm = d.data().normalized || d.id;
+          if (regexCandidates.some(rx => rx.test(norm))) {
+            detailsDoc = { id: d.id, ...d.data() };
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+    if (!detailsDoc) {
+      const idCandidates = buildIdCandidatesFromTitles(variants);
+      if (idCandidates.length) {
+        try {
+          const byId = await tryGetDocByIds(idCandidates, DETAILS_COLLECTION);
+          if (byId) detailsDoc = byId;
+        } catch (_) {}
+      }
+    }
+    let animeMeta = null;
+    try {
+      animeMeta = await fetchFirebaseDocByTitles(variants, "animes");
+    } catch (_) { /* ignore */ }
+    const seasonsMap = new Map();
+    if (detailsDoc && detailsDoc.episodes) {
+      const epsField = detailsDoc.episodes;
+      if (Array.isArray(epsField)) {
+        seasonsMap.set("Saison 1", epsField);
+      } else if (typeof epsField === "object") {
+        for (const [seasonNameRaw, arrLike] of Object.entries(epsField)) {
+          let arr = arrLike;
+          if (arr && !Array.isArray(arr) && typeof arr === "object") {
+            const keys = Object.keys(arr).filter(k => !isNaN(k)).sort((a, b) => Number(a) - Number(b));
+            arr = keys.map(k => arr[k]);
+          }
+          seasonsMap.set(String(seasonNameRaw), Array.isArray(arr) ? arr : []);
+        }
+      }
+    }
+    if (seasonsMap.size === 0 && animeMeta && typeof animeMeta.episodesCount === "number") {
+      const count = animeMeta.episodesCount;
+      const arr = [];
+      for (let i = 1; i <= count; i++) arr.push({ index: i, name: `Épisode ${i}`, release_date: null, languages: {} });
+      seasonsMap.set("Saison 1", arr);
+    }
+    if (seasonsMap.size === 0) {
+      return options.grouped ? { grouped: [], flat: [] } : [];
+    }
+    const allEpisodes = [];
+    const preferLangPriority = ["VF", "VOSTFR", "FR", "VOST", "SUB", "DEFAULT"];
+    for (const [seasonName, epsArr] of seasonsMap.entries()) {
+      for (let i = 0; i < (epsArr || []).length; i++) {
+        const raw = epsArr[i] || {};
+        const num = raw.index ?? raw.episode ?? raw.number ?? (i + 1);
+        const epTitle = raw.name || raw.title || `Épisode ${num}`;
+        const date = raw.release_date || raw.date || null;
+        const langsRaw = raw.languages || raw.language || raw.lang || raw.langs || {};
+        const langs = {};
+        if (Array.isArray(langsRaw)) {
+          langs.default = langsRaw.filter(Boolean);
+        } else if (langsRaw && typeof langsRaw === "object") {
+          for (const [lk, lv] of Object.entries(langsRaw)) {
+            langs[String(lk).toUpperCase()] = Array.isArray(lv) ? lv.filter(Boolean) : (lv ? [lv] : []);
+          }
+        }
+        let defaultUrl = null;
+        for (const p of preferLangPriority) {
+          if (langs[p] && langs[p][0]) { defaultUrl = langs[p][0]; break; }
+        }
+        if (!defaultUrl) {
+          const firstLang = Object.keys(langs)[0];
+          defaultUrl = firstLang ? (langs[firstLang][0] || null) : null;
+        }
+        const thumbnail =
+          animeMeta?.image || animeMeta?.posterImage ||
+          detailsDoc?.image ||
+          detailsDoc?.posterImage ||
+          animeMeta?.coverImage ||
+          null;
+        const seasonKey = collapseNormalizedKey(normalizeTitleForSeasonKey(String(seasonName)));
+        const baseId = detailsDoc?.id || animeMeta?.id || buildIdCandidatesFromTitles(variants)[0] || "unknown";
+        const epId = raw.id || `${baseId}-${seasonKey}-ep-${num}`;
+        allEpisodes.push({
+          id: epId,
+          animeId: baseId,
+          title: epTitle,
+          number: Number(num),
+          season: String(seasonName),
+          seasonKey,
+          date,
+          languages: langs,
+          url: defaultUrl,
+          thumbnail,
+          raw: raw,
+        });
+      }
+    }
+    function seasonSortVal(name) {
+      const m = String(name).match(/(\d+)/);
+      return m ? Number(m[1]) : 1;
+    }
+    allEpisodes.sort((a, b) => {
+      const sa = seasonSortVal(a.season), sb = seasonSortVal(b.season);
+      if (sa !== sb) return sa - sb;
+      return (a.number || 0) - (b.number || 0);
+    });
+    if (options.grouped) {
+      const bySeason = new Map();
+      for (const ep of allEpisodes) {
+        if (!bySeason.has(ep.season)) bySeason.set(ep.season, []);
+        bySeason.get(ep.season).push(ep);
+      }
+      const grouped = Array.from(bySeason.entries()).map(([season, episodes]) => ({ season, episodes }));
+      return { grouped, flat: allEpisodes };
+    }
+    return allEpisodes;
+  } catch (e) {
+    console.error("fetchEpisodesByTitle error:", e?.message || e);
+    return options.grouped ? { grouped: [], flat: [] } : [];
+  }
+}
+
+export async function fetchEpisodesGroupedBySeason(titleOrAnime) {
+  return fetchEpisodesByTitle(titleOrAnime, { grouped: true });
+}
+
+function normalizeTitleForSeasonKey(title) {
+  if (typeof title !== "string" || !title.trim()) return "";
+  let s = stripDiacritics(title)
+    .replace(/[×✕✖]/g, "x")
+    .replace(/&/g, " and ")
+    .toLowerCase();
+  
+  // Remove all season/part indicators more aggressively
+  s = s
+    .replace(/[\[\]\(\)\{\}]/g, " ")
+    .replace(/\b(tv|ona|ova|special|movie|film|edition|remaster(?:ed)?|director'?s?\s*cut|uncut|uncensored|preview|pv|cm|commercial|omake)\b/gi, " ")
+    .replace(/\b(the\s*)?final\s*season\b/gi, " ")
+    // Remove season indicators
+    .replace(/\b(s(?:eason|aison)?|part(?:ie)?|cour|cours|arc)\s*\d+\b/gi, " ")
+    .replace(/\b(\d+)(st|nd|rd|th)\s*(season|saison|part|cour|cours|arc)\b/gi, " ")
+    .replace(/\b(2nd|3rd|4th|5th|6th|7th|8th|9th)\b/gi, " ")
+    .replace(/\b(i{1,3}|iv|v|vi{0,3}|x|xi{0,3}|xiv|xv|xvi{0,3})\b(?=\s|$)/gi, " ")
+    // Remove year indicators
+    .replace(/\b(19|20)\d{2}\b/g, " ")
+    // Remove common franchise extensions
+    .replace(/\b(brotherhood|shippuuden|kai|crystal|z|super|after story|next generations|remake|reboot|shin|neo|new|続|劇場版)\b/gi, " ")
+    // Remove subtitle separators and everything after them
+    .replace(/[:\-–—_].*$/, " ");
+  
+  s = s
+    .replace(/[:\-–—_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  
+  const tokens = normalizeTokens(splitTokens(s));
+  if (!tokens.length) return "";
+  return tokens.join("-");
+}
+
+function getBestTitle(item = {}) {
+  return item.title || item.title_en || item.title_romaji || item.title_english || "";
+}
+
+function isSeasonTwoPlusTitle(t = "") {
+  const s = String(t).toLowerCase();
+  return /\b(s(?:eason|aison)?\s*[2-9]\b|2nd\s*season|part\s*[2-9]\b|cour\s*[2-9]\b|ii\b|iii\b|iv\b|v\b|vi\b|x\b)/i.test(s);
+}
+
+function scoreAsBaseForHero(item = {}) {
+  const t = (getBestTitle(item) || "").toLowerCase();
+  const fmt = (item.format || item.subtype || item.type || "").toUpperCase();
+  let s = 0;
+  if (isSeasonTwoPlusTitle(t)) s += 50;
+  if (/\b(s(?:eason|aison)?\s*1|part\s*1|cour\s*1)\b/i.test(t)) s -= 20;
+  if (fmt === "TV") s -= 10;
+  return s;
+}
+
+function pickBaseFromFranchise(items = []) {
+  return items.slice().sort((a, b) => scoreAsBaseForHero(a) - scoreAsBaseForHero(b))[0] || items[0];
+}
+
+function collapseNormalizedKey(str) {
+  return str.replace(/\s+/g, "-");
+}
+
+function normalizeDisplayTitle(t) {
+  return t ? t.replace(/-/g, " ") : "";
+}
+
+function mapAnimeDocToCard(id, data) {
+  return {
+    id,
+    title: data.title || data.name || id,
+    title_en: data.title_en,
+    title_romaji: data.title_romaji,
+    posterImage: data.posterImage || data.image,
+    bannerImage: data.bannerImage,
+    coverImage: data.coverImage || data.image,
+    format: data.format,
+    genres: data.genres || [],
+    averageScore: data.averageScore,
+    popularity: data.popularity,
+  };
+}
+
+export {
+  findBestAnimeSamaMatch,
+  findAnimeSamaCandidates,
+  generateAliases,
+  testMatching,
+  fetchAniListImagesByTitle,
+  fetchAniListImagesByMalId
+};

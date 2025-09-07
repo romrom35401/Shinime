@@ -31,7 +31,7 @@ export class VideoExtractorV5 {
 }
 
   // Configuration
-  static BACKEND_URL = 'https://video-extractor-wqlx.onrender.com'; // ← REMPLACE PAR TON URL RENDER
+  static BACKEND_URL = 'https://video-extractorv2py.onrender.com'; // ← REMPLACE PAR TON URL RENDER
   static MAX_RETRIES = 6;
   static RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 32000]; // Même que Python
   static CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes
@@ -165,55 +165,56 @@ export class VideoExtractorV5 {
   /**
    * Callback vers Backend V7.0
    */
-    static async callBackendV7(url, options = {}) {
-    const queryParams = new URLSearchParams({
-      url: url,
-      ...(options.prefer && { prefer: options.prefer }),
-      ...(options.timeout && { timeout: options.timeout.toString() }),
-      ...(options.quality && { quality: options.quality })
+  static async callBackendV7(url, options = {}) {
+    if (!url) throw new Error('URL requise (callBackendV7)');
+
+    const backendUrl = `${this.BACKEND_URL}/extract`;
+    console.log(`📡 V5 -> Backend: POST ${backendUrl}`);
+
+    const response = await this.fetchWithTimeout(backendUrl, {
+        method: 'POST',
+        headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'VideoExtractorV5/1.0'
+        },
+        timeout: options.timeout || 60000,
+        body: JSON.stringify({ 
+            url: url,
+            timeout: options.timeout || 45 
+        })
     });
-    
-    const backendUrl = `${this.BACKEND_URL}/api/extract?${queryParams}`;
-    
-    console.log(`📡 V5 -> V7.0 Backend: ${backendUrl.slice(0, 120)}...`);
-    
-    // CORRECTION: Assign the result of the fetch call to the response variable
-    const response = await this.fetchWithTimeout(backendUrl, { 
-      method: 'GET', 
-      headers: { 'Accept': 'application/json', 'User-Agent': 'VideoExtractorV5/1.0' }, 
-      timeout: options.timeout || 60000
-    });
-    
-    const responseData = await response.json();
-    
-    console.log(`📦 V5 Réponse V7.0:`, {
-      success: responseData.success,
-      version: responseData.version,
-      extractor: responseData.data?.extractor,
-      cached: responseData.metadata?.cached,
-      attemptUsed: responseData.metadata?.attemptUsed
-    });
-    
-    if (!response.ok || !responseData.success) {
-      throw new Error(responseData.error?.message || `HTTP ${response.status}`);
+
+    let responseData;
+    try {
+        responseData = await response.json();
+    } catch (err) {
+        throw new Error('Réponse JSON invalide du backend');
     }
-    
-    if (!responseData.data || !responseData.data.url) {
-      throw new Error('No video URL in backend response');
+
+    if (!responseData.success) {
+        throw new Error(responseData.error || `Erreur backend HTTP ${response.status}`);
     }
-    
+
+    // Utiliser stream_url en priorité
+    const resultUrl = responseData.stream_url || responseData.extracted_url || responseData.url;
+    if (!resultUrl) {
+        throw new Error('Aucune URL de stream retournée par le serveur');
+    }
+
     return {
-      url: responseData.data.url,
-      type: responseData.data.type || 'mp4',
-      quality: responseData.data.quality || 'auto',
-      headers: responseData.data.headers || {},
-      direct: responseData.data.direct || false,
-      extractor: responseData.data.extractor,
-      backendVersion: responseData.version,
-      backendAttempt: responseData.metadata?.attemptUsed,
-      backendTime: responseData.metadata?.extractionTime
+        url: resultUrl,
+        type: responseData.is_hls ? 'hls' : 'mp4',
+        quality: responseData.quality || this.detectQuality(resultUrl),
+        headers: {},
+        direct: responseData.is_direct || false,
+        extractor: responseData.method || 'yt-dlp',
+        backendVersion: 'main.py',
+        backendAttempt: 1,
+        backendTime: null
     };
   }
+
 
   /**
    * Test de connectivité Backend V7.0

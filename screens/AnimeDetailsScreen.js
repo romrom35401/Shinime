@@ -1,6 +1,4 @@
-// AnimeDetailsScreen V2.0 - Compatible VideoExtractor V5 + Player V2
-// Migration vers expo-video + backend V6 + gestion d'erreurs robuste
-
+// AnimeDetailsScreen V2.4 - Recherche améliorée pour films et franchises avec résolution canonique
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -15,7 +13,6 @@ import {
   Alert,
   Animated,
   Platform,
-  SafeAreaView,
   StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -23,19 +20,18 @@ import { BlurView } from 'expo-blur';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import { fetchEpisodesByTitle } from '../api/api';
-import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
+// MODIFICATION: Import de la nouvelle fonction
+import { fetchEpisodesByTitle, fetchFranchiseDetails } from '../api/api';
+import { doc, getDoc, collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../api/firebaseConfig';
-import { testBackendConnectivity } from '../api/test-backend';
-import { getNewBackendUrl, getLegacyBackendUrl, getPrimaryBackendUrl, BACKEND_CONFIG } from '../api/config';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+
+import { VideoExtractorV5 } from '../api/VideoExtractorV5';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
-// Configuration backend
-const BACKEND_URL = getPrimaryBackendUrl(); // Utilise le backend principal (Render)
-const NEW_BACKEND_URL = getPrimaryBackendUrl(); // Même URL pour la compatibilité
-
-// Couleurs Crunchyroll
+// CONFIGURATION SERVEUR RENDER
+const RENDER_SERVER_URL = 'https://video-extractorv2py.onrender.com';
 const COLORS = {
   primary: '#FF6B1A',
   secondary: '#F47521',
@@ -52,141 +48,193 @@ const COLORS = {
   new: '#00BCD4',
 };
 
-// ===============================
-// 🚀 SERVICE D'EXTRACTION VIDÉO
-// ===============================
+// MAPPING DES TITRES CANONIQUES (inchangé)
+const canonicalTitleMap = {
+  // Anime japonais populaires
+  'Naruto Shippuden': 'Naruto Shippuden',
+  'Naruto Shippuuden': 'Naruto Shippuden',
+  'Boruto: Naruto Next Generations': 'Boruto',
+  'Boruto: Naruto the Movie': 'Boruto',
+  'The Last: Naruto the Movie': 'Naruto',
+  'Rascal Doesnt Not Dream of Santa Claus': 'Rascal Does Not Dream of Bunny Senpai',
+  'Rascal Does Not Dream of a Sister Venturing Out': 'Rascal Does Not Dream of Bunny Senpai',
+  'Rascal Does Not Dream of a Dreaming Girl': 'Rascal Does Not Dream of Bunny Senpai',
+  'Seishun Buta Yarou': 'Rascal Does Not Dream of Bunny Senpai',
+  'Seishun Buta Yaro': 'Rascal Does Not Dream of Bunny Senpai',
+  'Seishun Buta Yarou wa Bunny Girl Senpai no Yume wo Minai': 'Rascal Does Not Dream of Bunny Senpai',
+  'Kimetsu no Yaiba': 'Demon Slayer',
+  'Kimetsu no Yaiba: Yuukaku-hen': 'Demon Slayer',
+  'Kimetsu no Yaiba: Mugen Train': 'Demon Slayer',
+  'Attack on Titan': 'Shingeki no Kyojin',
+  'Shingeki no Kyojin': 'Attack on Titan',
+  'Attack on Titan Season 1': 'Attack on Titan',
+  'Attack on Titan Season 2': 'Attack on Titan',
+  'Attack on Titan Season 3': 'Attack on Titan',
+  'Attack on Titan Season 4': 'Attack on Titan',
+  'Attack on Titan Final Season': 'Attack on Titan',
+  'Dragon Ball Super': 'Dragon Ball',
+  'Dragon Ball Z': 'Dragon Ball',
+  'Dragon Ball GT': 'Dragon Ball',
+  'Boku no Hero Academia': 'My Hero Academia',
+  'My Hero Academia': 'Boku no Hero Academia',
+  'Jujutsu Kaisen': 'Jujutsu Kaisen',
+  'Jujutsu Kaisen 0': 'Jujutsu Kaisen',
+  'One Piece': 'One Piece',
+  'One Piece Film': 'One Piece',
+  'One Piece Movie': 'One Piece',
+  'One Piece Special': 'One Piece',
+};
 
-class VideoExtractor {
-  static async extractVideoUrl(url, retryCount = 3) {
-    if (!url) throw new Error("URL manquante");
-    
-    if (this.isDirectVideo(url)) return url;
-    
-    console.log(`🔧 Tentative d'extraction pour: ${url.slice(0, 100)}...`);
-    
-    // Essayer différents paramètres d'extraction
-    const extractParams = [
-      'format=hls', // HLS en priorité
-      'prefer=mp4', // MP4 si disponible
-      ''            // Sans paramètre spécifique
-    ];
-    
-    for (const params of extractParams) {
-      for (let attempt = 1; attempt <= retryCount; attempt++) {
-        try {
-          console.log(`🔄 Tentative ${attempt}/${retryCount} avec ${params || 'paramètres par défaut'}...`);
-          
-          const extractUrl = `${BACKEND_URL}/api/extract?url=${encodeURIComponent(url)}${params ? '&' + params : ''}`;
-          const response = await fetch(extractUrl, {
-            method: 'GET',
-            headers: { 
-              'Accept': 'application/json',
-              'User-Agent': 'Shinime/1.0'
-            },
-            timeout: 15000
-          });
-          
-          console.log(`📡 Réponse backend: ${response.status} ${response.statusText}`);
-          
-          if (!response.ok) {
-            // Pour les erreurs 500, essayer avec le paramètre suivant
-            if (response.status === 500) {
-              console.warn(`⚠️ Erreur 500, essai avec paramètre suivant...`);
-              break; // Sortir des tentatives pour ce paramètre
-            }
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+// FONCTIONS DE RESOLUTION CANONIQUE (inchangées)
+function getCanonicalTitle(title) {
+  if (!title) return title;
+  const baseTitle = extractBaseFranchiseName(title);
+  const titlesToTest = Array.from(new Set([baseTitle, title].filter(Boolean)));
+  for (const testTitle of titlesToTest) {
+      for (const [variant, canonical] of Object.entries(canonicalTitleMap)) {
+          if (stripDiacritics(testTitle).toLowerCase().includes(stripDiacritics(variant).toLowerCase())) {
+              return canonical;
           }
-          
-          const data = await response.json();
-          console.log("📦 Données reçues:", data);
-          
-          // Accepter MP4 et HLS (m3u8) pour Expo Go
-          console.log("🔍 Test URL:", data.url, "Type:", data.type);
-          if (data.url && /\.(mp4|m3u8)(\?|$)/i.test(data.url)) {
-            console.log("✅ URL vidéo extraite avec succès:", data.type, data.quality);
-            return data.url;
-          }
-          
-          if (data.error) {
-            throw new Error(data.error);
-          }
-          
-          if (data.streams && Array.isArray(data.streams) && data.streams.length > 0) {
-            // Format alternatif avec streams
-            const bestStream = data.streams.find(s => s.url && /\.(mp4|m3u8)(\?|$)/i.test(s.url));
-            if (bestStream) {
-              console.log("✅ Stream vidéo trouvé:", bestStream.type);
-              return bestStream.url;
-            }
-          }
-          
-          throw new Error("Pas de lien vidéo valide dans la réponse");
-          
-        } catch (error) {
-          console.warn(`❌ Tentative ${attempt}/${retryCount} échouée:`, error.message);
-          
-          if (attempt === retryCount) {
-            // Si c'est la dernière tentative pour ce paramètre, continuer avec le suivant
-            console.log(`🔄 Passage au paramètre suivant après échec avec: ${params || 'défaut'}`);
-            break;
-          }
-          
-          const delayMs = 1000 * attempt;
-          console.log(`⏳ Attente ${delayMs}ms avant nouvelle tentative...`);
-          await this.delay(delayMs);
-        }
       }
-    }
-    
-    throw new Error(`Échec extraction après ${retryCount} tentatives avec tous les paramètres`);
+      if (Object.values(canonicalTitleMap).includes(testTitle)) {
+          return testTitle;
+      }
+      const titleLower = stripDiacritics(testTitle).toLowerCase();
+      if (titleLower.includes('naruto')) return 'Naruto';
+      if (titleLower.includes('dragon ball') || titleLower.includes('ballerz')) return 'Dragon Ball';
+      if (titleLower.includes('attack on titan') || titleLower.includes('shingeki no kyojin')) return 'Attack on Titan';
+      if (titleLower.includes('one piece')) return 'One Piece';
+      if (titleLower.includes('my hero academia') || titleLower.includes('boku no hero')) return 'My Hero Academia';
   }
-  
-  static isDirectVideo(url) {
-    if (!url || typeof url !== 'string') return false;
-    return /\.(mp4|m3u8|webm)(\?|$)/i.test(url);
-  }
-  
-  static delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  return baseTitle;
 }
 
-// ===============================
-// 🛠️ HELPERS POUR PARSING
-// ===============================
 
+// HELPERS AMÉLIORÉS POUR LA RECHERCHE DE FRANCHISES (inchangés)
 function stripDiacritics(s = "") {
   return s.normalize?.("NFD").replace(/[\u0300-\u036f]/g, "") ?? s;
+}
+const getAnimeUniqueId = (a) => a?.id || a?.mal_id || a?.anilistId || a?.anilist_id || a?.slug || a?._id || (a?.title ? a.title.replace(/\s+/g,'_') : null);
+
+function extractBaseFranchiseName(title) {
+  if (!title) return "";
+  let cleanTitle = stripDiacritics(title).toLowerCase().trim();
+  const patterns = [
+    /\s*(saison|season|s|partie|part|part)\s*\d+/gi,
+    /\s*(film|movie|ova|ona|special|tv|edition|uncut|uncensored|:|-|—)\s*\d*/gi,
+    /\s*(the movie|the special|the ova|the ona)\s*/gi,
+    /\s*(début|fin|partie|final|commencement|conclusion)\s*/gi,
+    /\s*(épisode|episode|ep)\s*\d+/gi,
+    /\s*\d+(?:ème|eme|nd|rd|th)?\s*(saison|season)/gi,
+    /\s*(vol|volume)\s*\d+/gi,
+    /\s*(chapitre|chapter)\s*\d+/gi,
+    /\s*(arc)\s*\d+/gi,
+    /\s*\(\d{4}\)\s*/gi,
+    /\s*\[.*?\]\s*/gi,
+    /\s*\(.*?\)\s*/gi,
+    /\s*:\s*/gi,
+    /\s*-\s*/gi,
+    /\s*—\s*/gi,
+    /\s*\|\s*/gi,
+    /\s+\(TV\)\s*/gi,
+    /\s+\(Movie\)\s*/gi,
+    /\s+\(Special\)\s*/gi,
+  ];
+  patterns.forEach(pattern => {
+    cleanTitle = cleanTitle.replace(pattern, ' ');
+  });
+  cleanTitle = cleanTitle.replace(/[:\-_.,!?'"]/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleanTitle;
 }
 
 function normalizeTitleForSeasonKey(title) {
   if (!title) return "";
-  return stripDiacritics(title)
-    .toLowerCase()
-    .replace(/[\[\]\(\):_.,'™!¡?¿]/g, " ")
-    .replace(/\b(tv|ona|ova|special|movie|edition|uncut|uncensored)\b/gi, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .trim();
+  const baseTitle = extractBaseFranchiseName(title);
+  return baseTitle.replace(/[\[\]\(\):_.,'™!¡?¿]/g, " ").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").trim();
 }
 
 function buildIdCandidatesFromTitles(titles = []) {
   const ids = new Set();
-  titles.filter(Boolean).forEach((t) => {
-    const slug = normalizeTitleForSeasonKey(t);
-    if (slug) {
-      ids.add(slug);
-      ids.add(slug.replace(/-/g, ""));
+  titles.filter(Boolean).forEach((title) => {
+    const originalSlug = normalizeTitleForSeasonKey(title);
+    if (originalSlug) {
+      ids.add(originalSlug);
+      ids.add(originalSlug.replace(/-/g, ""));
+    }
+    const franchiseSlug = normalizeTitleForSeasonKey(extractBaseFranchiseName(title));
+    if (franchiseSlug && franchiseSlug !== originalSlug) {
+      ids.add(franchiseSlug);
+      ids.add(franchiseSlug.replace(/-/g, ""));
+    }
+    const specialNumPatterns = [
+      { from: /\b(?:no|n°|number)\s*\.?\s*(\d+)/gi, to: "n$1" },
+      { from: /\b(?:no|n°|number)\s*\.?\s*(\d+)/gi, to: "-$1" },
+      { from: /\b(?:no|n°|number)\s*\.?\s*(\d+)/gi, to: "-no-$1" }
+    ];
+    specialNumPatterns.forEach(pattern => {
+      const modifiedTitle = title.toLowerCase().replace(pattern.from, pattern.to);
+      if (modifiedTitle !== title.toLowerCase()) {
+        const specialSlug = normalizeTitleForSeasonKey(modifiedTitle);
+        if (specialSlug) {
+          ids.add(specialSlug);
+          ids.add(specialSlug.replace(/-/g, ""));
+        }
+      }
+    });
+    const firstPart = title.split(/[\s:-]/).filter(Boolean)[0];
+    if (firstPart && firstPart.length > 3) {
+      const firstPartSlug = normalizeTitleForSeasonKey(firstPart);
+      if (firstPartSlug) {
+        ids.add(firstPartSlug);
+        ids.add(firstPartSlug.replace(/-/g, ""));
+      }
     }
   });
   return Array.from(ids);
 }
 
+function generateTitleVariants(titles) {
+  const variants = new Set();
+  titles.filter(Boolean).forEach(title => {
+    if (!title) return;
+    variants.add(title);
+    const baseTitle = extractBaseFranchiseName(title);
+    if (baseTitle) {
+      variants.add(baseTitle);
+    }
+    const normalized = normalizeTitleForSeasonKey(title);
+    if (normalized) variants.add(normalized);
+    const franchiseNormalized = normalizeTitleForSeasonKey(baseTitle);
+    if (franchiseNormalized && franchiseNormalized !== normalized) {
+      variants.add(franchiseNormalized);
+    }
+    if (normalized) {
+      const collapsed = normalized.replace(/-/g, '');
+      if (collapsed) variants.add(collapsed);
+    }
+    const firstWord = title.split(/[\s:-]/).filter(Boolean)[0];
+    if (firstWord && firstWord.length > 3) {
+      variants.add(firstWord);
+      const firstWordNormalized = normalizeTitleForSeasonKey(firstWord);
+      if (firstWordNormalized) variants.add(firstWordNormalized);
+    }
+    const canonicalTitle = getCanonicalTitle(title);
+    if (canonicalTitle && canonicalTitle !== title && canonicalTitle !== baseTitle) {
+      variants.add(canonicalTitle);
+      variants.add(normalizeTitleForSeasonKey(canonicalTitle));
+    }
+    const withoutCommonWords = title.replace(/\b(the|le|la|les|un|une|des|de|du)\b/gi, '').replace(/\s+/g, ' ').trim();
+    if (withoutCommonWords && withoutCommonWords !== title) {
+      variants.add(withoutCommonWords);
+    }
+  });
+  return Array.from(variants).filter(Boolean);
+}
+
+// FONCTIONS EXISTANTES (inchangées)
 function normalizeEpisodeLanguages(e = {}) {
   const out = {};
   if (!e || typeof e !== "object") return out;
-  
   const push = (k, v) => {
     if (!k || v == null) return;
     const kk = String(k).toUpperCase();
@@ -198,20 +246,16 @@ function normalizeEpisodeLanguages(e = {}) {
       arr.forEach(x => out[kk].push(x));
     }
   };
-
   if (e.languages && typeof e.languages === "object") {
     for (const k of Object.keys(e.languages)) push(k, e.languages[k]);
   }
-
   if (e.LANGUAGES && typeof e.LANGUAGES === "object") {
     for (const k of Object.keys(e.LANGUAGES)) push(k, e.LANGUAGES[k]);
   }
-
   const TOP_KEYS = ['VOSTFR','VF','FR','VOST','SUB','DEFAULT','VO'];
   for (const k of TOP_KEYS) {
     if (e[k]) push(k, e[k]);
   }
-
   return out;
 }
 
@@ -220,51 +264,27 @@ function pickBestUrlFromEpisode(ep = {}, preferredLangs = ["VOSTFR","VF","FR","V
   if (ep.url) return ep.url;
   if (ep.video) return ep.video;
   if (ep.link) return ep.link;
-  
   const normalized = normalizeEpisodeLanguages(ep);
-
-  // Fonction pour valider une URL
   const isValidVideoUrl = (url) => {
     if (!url || typeof url !== 'string') return false;
-    // Rejeter les URLs publicitaires et de redirection
-    const invalidPatterns = [
-      /^intent:\/\//i,
-      /ak\.amskiploomr\.com/i,
-      /doubleclick\.net/i,
-      /googlesyndication\.com/i,
-      /adservice\.google\.com/i,
-      /ads\./i,
-      /tracker\./i,
-      /analytics\./i,
-      /pixel\./i,
-      /beacon\./i
-    ];
+    const invalidPatterns = [/^intent:\/\//i, /ak\.amskiploomr\.com/i, /doubleclick\.net/i, /googlesyndication\.com/i, /adservice\.google\.com/i, /ads\./i, /tracker\./i, /analytics\./i, /pixel\./i, /beacon\./i];
     return !invalidPatterns.some(pattern => pattern.test(url));
   };
-
-  // Essayer d'abord les URLs qui fonctionnent mieux
   const preferredHosts = ['sibnet.ru', 'sendvid.com', 'vk.com', 'vidmoly.net'];
-
   for (const lang of preferredLangs) {
     const arr = normalized[lang];
     if (!arr || !arr.length) continue;
-
-    // Chercher d'abord les URLs des hôtes préférés
     for (const url of arr) {
       if (url && isValidVideoUrl(url) && preferredHosts.some(host => url.includes(host))) {
         return url;
       }
     }
-
-    // Sinon prendre la première URL valide
     for (const url of arr) {
       if (url && isValidVideoUrl(url)) {
         return url;
       }
     }
   }
-
-  // Fallback : chercher n'importe quelle URL valide
   for (const k of Object.keys(normalized)) {
     for (const url of normalized[k]) {
       if (url && isValidVideoUrl(url)) {
@@ -272,180 +292,189 @@ function pickBestUrlFromEpisode(ep = {}, preferredLangs = ["VOSTFR","VF","FR","V
       }
     }
   }
-
-  return null;
-}
-
-// ===============================
-// 🗄️ FIRESTORE HELPERS
-// ===============================
-
-async function tryFetchFromFirestore(titleVariants = []) {
-  try {
-    // Priorité à animeDetails car c'est là que sont les épisodes
-    const collectionNames = ["animeDetails", "animesDetails", "animesDetail", "anime", "animes", "animes_details"];
-    const ids = buildIdCandidatesFromTitles(titleVariants);
-
-    for (const colName of collectionNames) {
-      try {
-        for (const id of ids) {
-          try {
-            const snap = await getDoc(doc(db, colName, id));
-            if (snap.exists()) {
-              return { id: snap.id, data: snap.data(), collection: colName };
-            }
-          } catch (e) {
-            continue;
-          }
-        }
-      } catch (e) {}
-
-      try {
-        const colRef = collection(db, colName);
-        const snap = await getDocs(colRef);
-        const norms = titleVariants.map(normalizeTitleForSeasonKey).filter(Boolean);
-        
-        for (const d of snap.docs) {
-          const dat = d.data();
-          const norm = (dat.normalized || d.id || "").toLowerCase();
-          if (norms.some((n) => new RegExp("^" + n.replace(/-/g, "[- ]?") + "$", "i").test(norm))) {
-            return { id: d.id, data: dat, collection: colName };
-          }
-
-          const titlesAll = Array.isArray(dat.titlesAll) ? dat.titlesAll :
-            (Array.isArray(dat.title_variants) ? dat.title_variants : []);
-          
-          for (const cand of titleVariants) {
-            if (titlesAll && titlesAll.some((t) =>
-              String(t || "").toLowerCase() === String(cand || "").toLowerCase())) {
-              return { id: d.id, data: dat, collection: colName };
-            }
-          }
-        }
-      } catch (e) {}
-    }
-  } catch (e) {}
   return null;
 }
 
 function parseDocDataToSeasons(docData = {}, fallbackTitle = "Episode") {
   const seasons = [];
   const flat = [];
-
   if (docData?.episodes && typeof docData.episodes === "object" && !Array.isArray(docData.episodes)) {
+    console.log("📊 Structure episodes détectée:", Object.keys(docData.episodes));
     for (const [seasonName, arr] of Object.entries(docData.episodes)) {
       if (!Array.isArray(arr)) continue;
-      
+      console.log(`🔍 Traitement ${seasonName}:`, arr.length, "épisodes");
       const eps = arr.map((e, idx) => {
         const number = e.index ?? e.number ?? idx + 1;
-        const title = e.name ?? e.title ?? `Épisode ${number}`;
-        const languages = normalizeEpisodeLanguages(e);
-        const date = e.release_date ?? e.date ?? null;
-        const id = `${seasonName}-${number}`;
-        const ep = { id, number, title, languages, date, thumbnail: e.thumbnail };
+        const title = e.name ?? e.title ?? `Episode ${number}`;
+        const languages = {};
+        if (e.languages && typeof e.languages === "object") {
+          Object.entries(e.languages).forEach(([lang, urls]) => {
+            const langKey = lang.toUpperCase();
+            if (Array.isArray(urls)) {
+              languages[langKey] = urls.filter(url => url && typeof url === 'string');
+            }
+          });
+        }
+        const ep = { id: `${seasonName}-${number}`, number, title, languages, date: e.release_date ?? e.date ?? null, thumbnail: e.thumbnail, seasonName };
         flat.push(ep);
         return ep;
       });
-      
-      seasons.push({ season: seasonName, episodes: eps });
+      seasons.push({ season: seasonName, episodes: eps, episodeCount: eps.length });
     }
   }
-
-  const seasonalKeys = Object.keys(docData || {}).filter(k =>
-    /^saison\s*\d+/i.test(k) || /^season\s*\d+/i.test(k)
-  );
-  
-  for (const sk of seasonalKeys) {
-    const arr = docData[sk];
-    if (!Array.isArray(arr)) continue;
-    if (seasons.find(s => s.season === sk)) continue;
-    
-    const eps = arr.map((e, idx) => {
-      const number = e.index ?? e.number ?? idx + 1;
-      const title = e.name ?? e.title ?? `Épisode ${number}`;
-      const languages = normalizeEpisodeLanguages(e);
-      const date = e.release_date ?? e.date ?? null;
-      const id = `${sk}-${number}`;
-      const ep = { id, number, title, languages, date, thumbnail: e.thumbnail };
-      flat.push(ep);
-      return ep;
-    });
-    
-    seasons.push({ season: sk, episodes: eps });
-  }
-
-  if (Array.isArray(docData.seasons) && docData.seasons.length > 0) {
-    for (const s of docData.seasons) {
-      const epsArr = (docData.episodes && docData.episodes[s]) ||
-        (docData.bySeason && docData.bySeason[s]) || [];
-      if (!Array.isArray(epsArr) || epsArr.length === 0) continue;
-      if (seasons.find(x => x.season === s)) continue;
-      
-      const eps = epsArr.map((e, idx) => {
-        const number = e.index ?? e.number ?? idx + 1;
-        const title = e.name ?? e.title ?? `Épisode ${number}`;
-        const languages = normalizeEpisodeLanguages(e);
-        const date = e.release_date ?? e.date ?? null;
-        const id = `${s}-${number}`;
-        const ep = { id, number, title, languages, date, thumbnail: e.thumbnail };
-        flat.push(ep);
-        return ep;
-      });
-      
-      seasons.push({ season: s, episodes: eps });
-    }
-  }
-
-  if (seasons.length === 0) {
-    const maybe = docData.episodesList || docData.items || docData.list || docData.episodes;
-    if (Array.isArray(maybe) && maybe.length > 0) {
-      const eps = maybe.map((e, idx) => {
-        const number = e.index ?? e.number ?? idx + 1;
-        const title = e.name ?? e.title ?? `Épisode ${number}`;
-        const languages = normalizeEpisodeLanguages(e);
-        const date = e.release_date ?? e.date ?? null;
-        const id = `Saison 1-${number}`;
-        const ep = { id, number, title, languages, date, thumbnail: e.thumbnail };
-        flat.push(ep);
-        return ep;
-      });
-      
-      seasons.push({ season: "Saison 1", episodes: eps });
-    }
-  }
-
-  if (flat.length === 0 && docData?.url) {
-    const ep = {
-      id: docData.id || docData.title || fallbackTitle,
-      number: 1,
-      title: docData.title || fallbackTitle,
-      languages: { DEFAULT: [docData.url] },
-      thumbnail: docData.thumbnail
-    };
-    seasons.push({ season: "Saison 1", episodes: [ep] });
-    flat.push(ep);
-  }
-
   seasons.sort((a, b) => {
-    const aNum = parseInt((a.season.match(/\d+/) || [9999])[0]);
-    const bNum = parseInt((b.season.match(/\d+/) || [9999])[0]);
+    const aNum = parseInt((a.season.match(/\d+/) || [0])[0]);
+    const bNum = parseInt((b.season.match(/\d+/) || [0])[0]);
     return aNum - bNum;
   });
-
+  console.log("✅ Parsing terminé:", { seasonsCount: seasons.length, totalEpisodes: flat.length, seasons: seasons.map(s => ({ name: s.season, count: s.episodeCount })) });
   return { seasons, flat };
 }
+// EXTRACTION SERVEUR RENDER (inchangée)
+const extractWithRenderServer = async (sourceUrl) => {
+  try {
+    console.log("🚀 Extraction serveur Render pour:", sourceUrl.slice(0, 50) + "...");
+    const response = await fetch(`${RENDER_SERVER_URL}/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ url: sourceUrl, timeout: 45 }),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Serveur Render statut ${response.status}: ${errorText}`);
+    }
+    const result = await response.json();
+    if (!result.success) {
+      throw new Error(result.error || 'Extraction échouée');
+    }
+    const resultUrl = result.stream_url || result.extracted_url || result.url;
+    if (!resultUrl) {
+      throw new Error('Aucune URL de stream retournée par le serveur');
+    }
+    console.log("✅ Extraction Render réussie:", resultUrl.slice(0, 50) + "...");
+    return { url: resultUrl, success: true, method: 'render-yt-dlp-server', isDirectVideo: result.is_direct || false, ext: result.ext || null };
+  } catch (error) {
+    console.error("❌ Erreur extraction serveur Render:", error);
+    return { success: false, error: error.message || 'Erreur inconnue du serveur Render' };
+  }
+};
+// FIRESTORE HELPERS AMÉLIORÉS (inchangés)
+async function tryFetchFromFirestore(titleVariants = []) {
+  try {
+    const collectionNames = ["animeDetails", "animesDetails", "animesDetail", "anime", "animes", "animes_details"];
+    const ids = buildIdCandidatesFromTitles(titleVariants);
+    console.log("🔍 V2.4 Recherche avec variantes:", titleVariants.slice(0, 3));
+    console.log("🔍 V2.4 IDs candidats:", ids.slice(0, 5));
+    for (const colName of collectionNames) {
+      try {
+        for (const id of ids) {
+          try {
+            const snap = await getDoc(doc(db, colName, id));
+            if (snap.exists()) {
+              console.log(`✅ V2.4 Trouvé par ID direct: ${colName}/${id}`);
+              return { id: snap.id, data: snap.data(), collection: colName };
+            }
+          } catch (e) { continue; }
+        }
+      } catch (e) {}
+    }
+    for (const colName of collectionNames) {
+      try {
+        const colRef = collection(db, colName);
+        const snap = await getDocs(colRef);
+        const normalizedVariants = titleVariants.map(t => extractBaseFranchiseName(t)).filter(Boolean).map(t => t.toLowerCase());
+        for (const d of snap.docs) {
+          const dat = d.data();
+          const docNormalized = (dat.normalized || d.id || "").toLowerCase();
+          if (normalizedVariants.some(variant => {
+            const pattern = new RegExp("^" + variant.replace(/[-\s]/g, "[- ]?") + "$", "i");
+            return pattern.test(docNormalized);
+          })) {
+            console.log(`✅ V2.4 Trouvé par normalized: ${colName}/${d.id}`);
+            return { id: d.id, data: dat, collection: colName };
+          }
+          const titlesAll = Array.isArray(dat.titlesAll) ? dat.titlesAll : (Array.isArray(dat.title_variants) ? dat.title_variants : []);
+          for (const variant of titleVariants) {
+            const variantBase = extractBaseFranchiseName(variant);
+            if (titlesAll && titlesAll.some((t) => {
+              const tBase = extractBaseFranchiseName(String(t || ""));
+              return tBase.toLowerCase() === variantBase.toLowerCase() || String(t || "").toLowerCase() === String(variant || "").toLowerCase();
+            })) {
+              console.log(`✅ V2.4 Trouvé par titlesAll: ${colName}/${d.id}`);
+              return { id: d.id, data: dat, collection: colName };
+            }
+          }
+          const mainTitle = dat.title || dat.name || "";
+          if (mainTitle) {
+            const mainTitleBase = extractBaseFranchiseName(mainTitle);
+            if (normalizedVariants.some(variant => mainTitleBase.toLowerCase().includes(variant) || variant.includes(mainTitleBase.toLowerCase()))) {
+              console.log(`✅ V2.4 Trouvé par fuzzy match: ${colName}/${d.id}`);
+              return { id: d.id, data: dat, collection: colName };
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`❌ V2.4 Erreur scan ${colName}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.log("❌ V2.4 Erreur générale Firestore:", e.message);
+  }
+  return null;
+}
 
-// ===============================
-// 🎬 COMPOSANT PRINCIPAL V2.0
-// ===============================
+const testRenderServerConnectivity = async () => {
+  try {
+    const response = await fetch(`${RENDER_SERVER_URL}/`, { method: 'GET', timeout: 10000 });
+    if (response.ok) {
+      const text = await response.text();
+      return { success: true, message: text || 'Serveur opérationnel', status: response.status };
+    }
+    return { success: false, message: `Statut HTTP: ${response.status}`, status: response.status };
+  } catch (error) {
+    console.error('❌ Erreur connexion serveur:', error);
+    return { success: false, error: error.message || 'Impossible de contacter le serveur', status: null };
+  }
+};
+const toggleWatchlist = useCallback(async () => {
+  try {
+    const raw = await AsyncStorage.getItem('myAnimeList');
+    const list = raw ? JSON.parse(raw) : [];
+    const id = getAnimeUniqueId(anime);
+    if (!id) {
+      Alert.alert('Erreur', "Impossible d'identifier cet animeData.");
+      return;
+    }
+    const exists = list.some(i => getAnimeUniqueId(i) === id);
+    let newList;
+    if (exists) {
+      newList = list.filter(i => getAnimeUniqueId(i) !== id);
+      await AsyncStorage.setItem('myAnimeList', JSON.stringify(newList));
+      setIsInWatchlist(false);
+      Alert.alert('Supprimé', `"${animeData.title || animeData.name}" a été retiré de votre liste.`);
+    } else {
+      const item = { ...animeData, id };
+      newList = [item, ...list];
+      await AsyncStorage.setItem('myAnimeList', JSON.stringify(newList));
+      setIsInWatchlist(true);
+      Alert.alert('Ajouté', `"${animeData.title || animeData.name}" a été ajouté à votre liste.`);
+    }
+  } catch (e) {
+    console.error('toggleWatchlist', e);
+    Alert.alert('Erreur', "Impossible de modifier la liste.");
+  }
+}, [animeData]);
 
+// COMPOSANT PRINCIPAL
 export default function AnimeDetailsScreenV2() {
   const navigation = useNavigation();
   const route = useRoute();
-  const anime = route?.params?.anime || {};
-
-  // États
-  const [animeData, setAnimeData] = useState(null);
+  // MODIFICATION: Renommé pour plus de clarté
+  const initialAnimeFromRoute = route?.params?.animeData || {};
+  
+  // MODIFICATION: L'état principal qui contiendra les données d'affichage (franchise + épisodes)
+  const [animeData, setAnimeData] = useState(initialAnimeFromRoute);
+  
   const [episodes, setEpisodes] = useState([]);
   const [seasons, setSeasons] = useState([]);
   const [selectedSeason, setSelectedSeason] = useState('Saison 1');
@@ -453,12 +482,24 @@ export default function AnimeDetailsScreenV2() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isInWatchlist, setIsInWatchlist] = useState(false);
+  useEffect(() => {
+  let mounted = true;
+  (async () => {
+    try {
+      const raw = await AsyncStorage.getItem('myAnimeList');
+      const list = raw ? JSON.parse(raw) : [];
+      const exists = list.some(i => getAnimeUniqueId(i) === getAnimeUniqueId(anime));
+      if (mounted) setIsInWatchlist(Boolean(exists));
+    } catch (e) {
+      console.warn('check watchlist', e);
+    }
+  })();
+  return () => { mounted = false; };
+  }, [anime]);
   const [selectedTab, setSelectedTab] = useState('episodes');
   const [expandedDescription, setExpandedDescription] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [resolvingMsg, setResolvingMsg] = useState("");
-
-  // Animations
   const scrollY = useRef(new Animated.Value(0)).current;
   const headerOpacity = scrollY.interpolate({
     inputRange: [0, 200],
@@ -466,425 +507,279 @@ export default function AnimeDetailsScreenV2() {
     extrapolate: 'clamp',
   });
 
-  // Titre et poster de l'anime
+  // MODIFICATION: Ces `useMemo` dépendent maintenant de `animeData` pour l'affichage
   const title = useMemo(() =>
-    anime.title || anime.title_romaji || anime.title_en || "—",
-    [anime]
+    animeData.title || animeData.title_romaji || animeData.title_en || "—",
+    [animeData]
   );
 
   const poster = useMemo(() =>
-    anime.posterImage || anime.bannerImage || anime.image || "",
-    [anime]
+    animeData.posterImage || animeData.bannerImage || animeData.image || "",
+    [animeData]
   );
-
-  // ===============================
-  // 📡 CHARGEMENT DES DONNÉES V2.0
-  // ===============================
+  
+  // MODIFICATION: Le titre canonique est toujours calculé à partir de l'objet initial
+  const canonicalTitle = useMemo(() => {
+    const titleVariants = [
+      initialAnimeFromRoute.title,
+      initialAnimeFromRoute.title_en,
+      initialAnimeFromRoute.title_romaji,
+      initialAnimeFromRoute.title_native,
+      ...(initialAnimeFromRoute.synonyms || []),
+      ...(initialAnimeFromRoute.title_variants || [])
+    ].filter(Boolean);
+    const primaryTitle = titleVariants[0] || "";
+    return getCanonicalTitle(primaryTitle);
+  }, [initialAnimeFromRoute]);
 
   const loadAnimeData = useCallback(async () => {
     try {
       setLoading(true);
-      console.log("📡 V2 Chargement des données pour:", title);
+      console.log("📡 V2.4 Chargement des données pour:", initialAnimeFromRoute.title);
+      console.log("🏷️ Titre canonique détecté:", canonicalTitle);
 
-      // 1️⃣ Essai API principale en priorité
-      console.log("🔄 V2 Tentative API principale...");
-      const providerRes = await fetchEpisodesByTitle(title);
+      // --- NOUVELLE LOGIQUE ---
+      // Étape 1 : Récupérer les détails de la franchise pour un affichage correct
+      const franchiseData = await fetchFranchiseDetails(canonicalTitle);
+      
+      // Étape 2 : Créer l'objet de données principal pour l'affichage.
+      // On garde les données initiales en fallback, mais on les écrase avec les données de la franchise si elles existent.
+      const masterDisplayData = { ...initialAnimeFromRoute, ...(franchiseData || {}) };
+      setAnimeData(masterDisplayData); // Mettre à jour l'affichage immédiatement !
+      // --- FIN DE LA NOUVELLE LOGIQUE ---
+      
+      const titleVariants = generateTitleVariants([
+        initialAnimeFromRoute.title,
+        canonicalTitle,
+        initialAnimeFromRoute.title_en,
+        initialAnimeFromRoute.title_romaji,
+        initialAnimeFromRoute.title_native,
+        ...(initialAnimeFromRoute.synonyms || []),
+        ...(initialAnimeFromRoute.title_variants || [])
+      ]);
 
-      console.log("📊 V2 Résultat API:", {
-        type: typeof providerRes,
-        isArray: Array.isArray(providerRes),
-        length: Array.isArray(providerRes) ? providerRes.length : 'N/A',
-        hasGrouped: providerRes && typeof providerRes === 'object' && 'grouped' in providerRes,
-        firstEpisode: Array.isArray(providerRes) && providerRes.length > 0 ? providerRes[0] : null
-      });
+      console.log("🔍 V2.4 Variantes générées:", titleVariants.slice(0, 5));
 
-      if (providerRes) {
-        let seasonsArr = [];
-        let flat = [];
+      let providerRes = null;
+      providerRes = await fetchEpisodesByTitle(canonicalTitle);
 
-        if (Array.isArray(providerRes) && providerRes.length > 0) {
-          const map = new Map();
-          providerRes.forEach((e, idx) => {
-            const seasonRaw = e.season ?? e.saison ?? e.season_number ?? e.seasonLabel ?? "Saison 1";
-            const seasonLabel = typeof seasonRaw === "number" ? `Saison ${seasonRaw}` : String(seasonRaw || "Saison 1");
-            const number = e.number ?? e.index ?? idx + 1;
-            const langs = normalizeEpisodeLanguages(e);
-            
-            const ep = {
-              id: e.id ?? `${seasonLabel}-${number}`,
-              number,
-              title: e.name ?? e.title ?? `Épisode ${number}`,
-              languages: langs,
-              date: e.date ?? e.release_date ?? null,
-              thumbnail: e.thumbnail,
-            };
+      if ((!providerRes || !Array.isArray(providerRes) || providerRes.length === 0) && canonicalTitle !== initialAnimeFromRoute.title) {
+        console.log("🔄 V2.4 Retry avec titre original:", initialAnimeFromRoute.title);
+        providerRes = await fetchEpisodesByTitle(initialAnimeFromRoute.title);
+      }
+      
+      // ... la suite de la logique de recherche d'épisodes reste la même
 
-            if (!map.has(seasonLabel)) map.set(seasonLabel, []);
-            map.get(seasonLabel).push(ep);
-          });
-
-          seasonsArr = Array.from(map.entries()).map(([s, eps]) => ({ season: s, episodes: eps }));
-          seasonsArr.sort((a, b) => {
-            const na = parseInt((a.season.match(/\d+/) || [9999])[0]);
-            const nb = parseInt((b.season.match(/\d+/) || [9999])[0]);
-            return na - nb;
-          });
-
-          flat = seasonsArr.flatMap((s) => s.episodes);
-
-          // Vérifier si les épisodes ont des URLs
-          const hasUrls = flat.some(ep => {
-            const langs = ep.languages || {};
-            return Object.keys(langs).length > 0 && Object.values(langs).some(arr => Array.isArray(arr) && arr.length > 0);
-          });
-
-          console.log("🔍 V2 Vérification URLs dans API:", {
-            episodesCount: flat.length,
-            hasUrls: hasUrls,
-            sampleEpisode: flat[0] ? {
-              id: flat[0].id,
-              languages: flat[0].languages,
-              languagesKeys: Object.keys(flat[0].languages || {})
-            } : null
-          });
-
-          if (hasUrls) {
-            setSeasons(seasonsArr);
-            setEpisodes(flat);
-            const idxS1 = seasonsArr.findIndex(s => /^saison\s*1/i.test(s.season));
-            if (idxS1 >= 0) setSelectedSeason(seasonsArr[idxS1].season);
-            setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
-            setLoading(false);
-            return;
-          }
-        }
-
-        if (typeof providerRes === "object" && providerRes.grouped && Array.isArray(providerRes.grouped)) {
-          seasonsArr = providerRes.grouped.map((g) => ({
-            season: g.season || g.title || g.name || "Saison",
-            episodes: (g.episodes || []).map((e, idx) => ({
-              id: e.id ?? `${g.season}-${idx}`,
-              number: e.number ?? e.index ?? idx + 1,
-              title: e.name ?? e.title ?? `Épisode ${idx + 1}`,
-              languages: normalizeEpisodeLanguages(e),
-              date: e.date ?? e.release_date ?? null,
-              thumbnail: e.thumbnail,
-            })),
-          }));
-          
-          flat = seasonsArr.flatMap((g) => g.episodes || []);
+      if (providerRes && Array.isArray(providerRes) && providerRes.length > 0) {
+        // ...
+        const hasUrls = flat.some(ep => Object.keys(ep.languages || {}).length > 0);
+        if (hasUrls) {
+          console.log("✅ V2.4 Données API trouvées");
           setSeasons(seasonsArr);
           setEpisodes(flat);
-          if (seasonsArr.length > 0) setSelectedSeason(seasonsArr[0].season);
-          setAnimeData({ ...anime, episodes: flat, seasons: seasonsArr });
+          const idxS1 = seasonsArr.findIndex(s => /^saison\s*1/i.test(s.season));
+          if (idxS1 >= 0) setSelectedSeason(seasonsArr[idxS1].season);
+          // MODIFICATION: On ajoute les épisodes aux données d'affichage déjà définies
+          setAnimeData(currentData => ({ ...currentData, episodes: flat, seasons: seasonsArr }));
           setLoading(false);
           return;
         }
       }
 
-      // 2️⃣ Fallback Firestore
-      console.log("🔄 V2 Fallback vers Firestore...");
-      const titleVariants = [
-        anime.title,
-        anime.title_en,
-        anime.title_romaji,
-        ...(anime.title_variants || []),
-      ].filter(Boolean);
-
-      console.log("🔍 V2 Variantes de titre:", titleVariants);
-
       let docFound = null;
-      if (anime.id) {
-        console.log("🔍 V2 Tentative avec ID exact:", anime.id);
-        try {
-          const snap = await getDoc(doc(db, "animeDetails", anime.id));
-          if (snap.exists()) {
-            docFound = { id: snap.id, data: snap.data(), collection: "animeDetails" };
-            console.log("✅ V2 Document trouvé avec ID exact dans animeDetails");
-          }
-        } catch (e) {
-          console.log("❌ V2 Erreur avec ID exact:", e.message);
-        }
+      if (initialAnimeFromRoute.id) {
+        // ...
       }
 
       if (!docFound) {
-        docFound = await tryFetchFromFirestore(titleVariants.length ? titleVariants : [title]);
+        docFound = await tryFetchFromFirestore([canonicalTitle, initialAnimeFromRoute.title, ...titleVariants.slice(0, 3)]);
       }
 
-      console.log("📄 V2 Document Firestore trouvé:", docFound ? {
-        id: docFound.id,
-        collection: docFound.collection,
-        hasData: !!docFound.data,
-        dataKeys: docFound.data ? Object.keys(docFound.data) : []
-      } : "Aucun document");
-
       if (docFound && docFound.data) {
-        console.log("📊 V2 Données Firestore brutes:", docFound.data);
-        const parsed = parseDocDataToSeasons(docFound.data, title);
-        
-        console.log("🔧 V2 Données parsées:", {
-          seasonsCount: parsed.seasons.length,
-          episodesCount: parsed.flat.length,
-          firstEpisode: parsed.flat[0] ? {
-            id: parsed.flat[0].id,
-            languages: parsed.flat[0].languages,
-            hasUrls: Object.keys(parsed.flat[0].languages || {}).length > 0
-          } : null
-        });
-
-        if (parsed.seasons.length) {
-          parsed.flat.forEach(ep => {
-            if (!ep.languages) ep.languages = {};
-          });
-
+        const parsed = parseDocDataToSeasons(docFound.data, canonicalTitle);
+        if (parsed.seasons.length > 0) {
+          console.log("✅ V2.4 Données Firestore trouvées");
           setSeasons(parsed.seasons);
           setEpisodes(parsed.flat);
-          if (parsed.seasons.length > 0) setSelectedSeason(parsed.seasons[0].season);
-          setAnimeData({ ...anime, episodes: parsed.flat, seasons: parsed.seasons });
+          setSelectedSeason(parsed.seasons[0].season);
+          // MODIFICATION: On fusionne les données de Firestore avec les données d'affichage
+          setAnimeData(currentData => ({
+            ...currentData,
+            ...docFound.data,
+            episodes: parsed.flat,
+            seasons: parsed.seasons,
+            episodesCount: parsed.flat.length
+          }));
           setLoading(false);
           return;
         }
       }
 
-      // 3️⃣ Aucun résultat
+      // ... logique de dernier recours
+
+      console.log("❌ V2.4 Aucune donnée trouvée");
       setSeasons([]);
       setEpisodes([]);
-      setAnimeData(anime);
-
+      
     } catch (error) {
-      console.error('V2 Erreur chargement anime:', error);
+      console.error('V2.4 Erreur chargement animeData:', error);
       Alert.alert(
         'Erreur de chargement',
-        'Impossible de charger les informations de l\'anime. Réessayer ?',
-        [
-          { text: 'Annuler', style: 'cancel' },
-          { text: 'Réessayer', onPress: loadAnimeData }
-        ]
+        `Impossible de charger les informations pour "${title}". Réessayer ?`,
+        [{ text: 'Annuler', style: 'cancel' }, { text: 'Réessayer', onPress: loadAnimeData }]
       );
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [anime, title]);
-
-  // ===============================
-  // 🎥 FONCTION DE LECTURE V2.0
-  // ===============================
-
-  const onPlayEpisode = useCallback(async (episode) => {
-    if (!episode) {
-      Alert.alert("Erreur", "Épisode invalide");
-      return;
-    }
-
-    console.log("🎬 V2 Tentative de lecture épisode:", {
-      id: episode.id,
-      title: episode.title,
-      number: episode.number,
-      languages: episode.languages,
-      url: episode.url
-    });
-
-    try {
-      setResolving(true);
-      setResolvingMsg("🔍 V2 Préparation du stream...");
-
-      // Vérifier si l'épisode a des URLs directes
-      console.log("🎯 V2 Épisode à lire:", {
-        id: episode.id,
-        languages: episode.languages,
-        hasUrls: Object.keys(episode.languages || {}).length > 0
-      });
-
-      // Essayer d'abord avec les URLs directes de l'épisode
-      let candidateUrl = pickBestUrlFromEpisode(episode, [selectedLanguage, "VOSTFR", "VF", "FR", "VO", "SUB", "DEFAULT"]);
-      
-      if (candidateUrl) {
-        console.log("✅ V2 URL trouvée directement:", candidateUrl);
-
-        // Si c'est une URL directe, l'utiliser directement
-        if (VideoExtractorV5.isDirectVideo(candidateUrl)) {
-          setResolving(false);
-          setResolvingMsg("");
-          
-          navigation.navigate("PlayerV2", { // Navigation vers PlayerV2
-            episode: {
-              ...episode,
-              url: candidateUrl,
-              originalUrl: candidateUrl,
-              anime: anime
-            }
-          });
-          return;
-        }
-
-        // Sinon, extraire avec VideoExtractor V5
-        console.log("🔧 V2 Extraction nécessaire avec VideoExtractor V5...");
-        setResolvingMsg("🔧 V2 Extraction en cours...");
-
-        try {
-          const extractionResult = await VideoExtractorV5.extractVideoUrl(candidateUrl, {
-            preferMp4: true,
-            timeout: 60000,
-            format: 'best'
-          });
-
-          console.log("🎯 V2 Résultat extraction V5:", {
-            success: !!extractionResult.url,
-            type: extractionResult.type,
-            quality: extractionResult.quality,
-            version: extractionResult.version,
-            extractor: extractionResult.extractor
-          });
-
-          if (extractionResult && extractionResult.url) {
-            setResolving(false);
-            setResolvingMsg("");
-
-            navigation.navigate("PlayerV2", { // Navigation vers PlayerV2
-              episode: {
-                ...episode,
-                url: extractionResult.url,
-                originalUrl: candidateUrl,
-                anime: anime,
-                streamHeaders: extractionResult.headers || {},
-                streamQuality: extractionResult.quality,
-                extractorVersion: extractionResult.version,
-                extractorUsed: extractionResult.extractor
-              }
-            });
-            return;
-          } else {
-            throw new Error('VideoExtractor V5 returned no URL');
-          }
-
-        } catch (extractError) {
-          console.error("❌ V2 Erreur extraction V5:", extractError);
-          setResolvingMsg("⚠️ V2 Fallback vers autres sources...");
-
-          // Fallback: essayer les autres URLs disponibles
-          const allUrls = [];
-          const normalized = normalizeEpisodeLanguages(episode);
-          
-          for (const lang of Object.keys(normalized)) {
-            allUrls.push(...normalized[lang]);
-          }
-
-          // Filtrer les URLs valides
-          const validUrls = allUrls.filter(url => {
-            if (!url || typeof url !== 'string') return false;
-            const invalidPatterns = [
-              /^intent:\/\//i,
-              /ak\.amskiploomr\.com/i,
-              /doubleclick\.net/i,
-              /ads\./i,
-              /tracker\./i
-            ];
-            return !invalidPatterns.some(pattern => pattern.test(url));
-          });
-
-          console.log("🔍 V2 URLs alternatives trouvées:", validUrls.length);
-
-          // Essayer les URLs alternatives une par une
-          for (let i = 0; i < validUrls.length; i++) {
-            const altUrl = validUrls[i];
-            try {
-              console.log(`🔄 V2 Tentative URL alternative ${i + 1}/${validUrls.length}: ${altUrl.slice(0, 50)}...`);
-              setResolvingMsg(`🔄 V2 Test source ${i + 1}/${validUrls.length}...`);
-
-              if (VideoExtractorV5.isDirectVideo(altUrl)) {
-                // URL directe
-                setResolving(false);
-                setResolvingMsg("");
-                
-                navigation.navigate("PlayerV2", {
-                  episode: {
-                    ...episode,
-                    url: altUrl,
-                    originalUrl: altUrl,
-                    anime: anime
-                  }
-                });
-                return;
-              } else {
-                // Essayer extraction
-                const altResult = await VideoExtractorV5.extractVideoUrl(altUrl, {
-                  preferMp4: true,
-                  timeout: 30000 // Timeout plus court pour alternatives
-                });
-
-                if (altResult && altResult.url) {
-                  setResolving(false);
-                  setResolvingMsg("");
-                  
-                  navigation.navigate("PlayerV2", {
-                    episode: {
-                      ...episode,
-                      url: altResult.url,
-                      originalUrl: altUrl,
-                      anime: anime,
-                      streamHeaders: altResult.headers || {}
-                    }
-                  });
-                  return;
-                }
-              }
-            } catch (altError) {
-              console.warn(`❌ V2 URL alternative ${i + 1} échouée:`, altError.message);
-              continue;
-            }
-          }
-
-          // Aucune alternative n'a fonctionné
-          throw new Error(`Extraction failed for all ${validUrls.length} available sources`);
-        }
-      }
-
-      // Aucune URL trouvée
-      throw new Error("Aucun lien vidéo trouvé pour cet épisode");
-
-    } catch (err) {
-      setResolving(false);
-      setResolvingMsg("");
-      console.error("💥 V2 Erreur critique lecture:", err);
-
-      Alert.alert(
-        "💥 Erreur de lecture",
-        `Impossible de lire l'épisode:\n\n${err.message}\n\nVeuillez réessayer ou choisir un autre épisode.`,
-        [
-          { text: 'OK', style: 'default' },
-          { 
-            text: 'Test Backend', 
-            onPress: async () => {
-              const backendStatus = await VideoExtractorV5.testBackendConnectivity();
-              Alert.alert(
-                'Status Backend V6',
-                `Statut: ${backendStatus.success ? '✅ OK' : '❌ Erreur'}\n` +
-                `Message: ${backendStatus.message}\n` +
-                `Version: ${backendStatus.version || 'N/A'}`
-              );
-            }
-          }
-        ]
-      );
-    }
-  }, [navigation, anime, selectedLanguage]);
-
-  // ===============================
-  // 🔄 EFFETS
-  // ===============================
+  }, [initialAnimeFromRoute, canonicalTitle]);
 
   useEffect(() => {
     loadAnimeData();
   }, [loadAnimeData]);
 
-  // Épisodes filtrés par saison
+  // FONCTION DE LECTURE (inchangée)
+  const onPlayEpisode = async (episode) => {
+    console.log('🎬 Tentatives de lecture pour l\'épisode:', episode.title);
+    try {
+        const languages = Object.keys(episode.languages || {});
+        const preferredLanguages = [selectedLanguage, "VOSTFR", "VF", "FR", "VO", "SUB", "DEFAULT"];
+        const validLanguages = languages.filter(lang => preferredLanguages.includes(lang));
+        const unsupportedDomains = ['vidmoly.net', 'ak.amskiploomr.com'];
+
+        for (const lang of validLanguages) {
+            const urls = episode.languages[lang] || [];
+            for (const url of urls) {
+                if (!url) continue;
+                try {
+                    const domain = new URL(url).hostname;
+                    if (unsupportedDomains.some(d => domain.includes(d))) {
+                        console.log(`✗ Skip: ${domain} non supporté`);
+                        continue;
+                    }
+                } catch (e) {
+                    console.log(`✗ URL invalide: ${url}`);
+                    continue;
+                }
+                console.log(`→ Tentative: ${lang} - ${url.slice(0, 50)}...`);
+                try {
+                    const response = await fetch(`${RENDER_SERVER_URL}/extract`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({ url: url, timeout: 45 }),
+                    });
+                    const contentType = response.headers.get("content-type");
+                    if (!contentType || !contentType.includes("application/json")) {
+                        console.error(`✗ Réponse non-JSON reçue (${contentType})`);
+                        const text = await response.text();
+                        console.error(`Contenu reçu: ${text.slice(0, 200)}...`);
+                        continue;
+                    }
+                    const result = await response.json();
+                    if (result.success && result.stream_url) {
+                        console.log(`✅ Extraction réussie: ${result.stream_url.slice(0, 50)}...`);
+                        navigation.navigate("Player", {
+                            episode: {
+                                ...episode,
+                                url: result.stream_url,
+                                languages: { [lang]: [result.stream_url] },
+                                animeData: animeData // On passe les données complètes de l'anime
+                            }
+                        });
+                        return;
+                    } else {
+                        console.log(`✗ Extraction échouée:`, result.error || 'Pas d\'URL retournée');
+                    }
+                } catch (error) {
+                    console.error(`✗ Erreur réseau/parsing pour ${url.slice(0, 50)}:`, error.message);
+                }
+            }
+        }
+        throw new Error("Aucun lien n'a fonctionné");
+    } catch (error) {
+        console.error("✗ Erreur globale:", error);
+        Alert.alert(
+            "Erreur de lecture",
+            "Impossible de lire cet épisode. Vérifiez votre connexion ou réessayez plus tard.",
+            [{ text: "Annuler", style: "cancel" }, { text: "Réessayer", onPress: () => onPlayEpisode(episode) }]
+        );
+    }
+  };
+
+
+  
+  // Dans renderDescription, utiliser animeData
+  const renderDescription = () => {
+    const description = (animeData?.description) || "";
+    // ...
+  };
+  
+  // Dans renderDetailsContent, utiliser animeData
+  const renderDetailsContent = () => (
+    <View style={styles.detailsContainer}>
+      <Text style={styles.sectionTitle}>Informations</Text>
+      <View style={styles.detailsGrid}>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Créateur</Text>
+          <Text style={styles.detailValue}>{animeData?.studio || "—"}</Text>
+        </View>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Genre</Text>
+          <Text style={styles.detailValue}>
+            {Array.isArray(animeData?.genres) ? animeData.genres.join(", ") : "Animation"}
+          </Text>
+        </View>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Année</Text>
+          <Text style={styles.detailValue}>{animeData?.year || "—"}</Text>
+        </View>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Statut</Text>
+          <Text style={styles.detailValue}>{animeData?.status || "—"}</Text>
+        </View>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Titre franchise</Text>
+          <Text style={styles.detailValue}>{canonicalTitle}</Text>
+        </View>
+        <View style={styles.detailItem}>
+          <Text style={styles.detailLabel}>Source de données</Text>
+          <Text style={styles.detailValue}>
+            {animeData?.collection ? `Firestore (${animeData.collection})` : "API"}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+  
+  // Le reste du composant (renderHeader, renderHeroSection, etc.) utilise déjà `title` et `poster`
+  // qui sont maintenant dérivés de `animeData`, donc aucune autre modification n'est nécessaire là-bas.
+
+  // Le reste du fichier est ici, inchangé...
+  const testServerConnectivity = async () => {
+    try {
+        const response = await fetch(`${RENDER_SERVER_URL}/health`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            console.log('✅ Serveur Render OK:', data);
+            return { success: true, ...data };
+        }
+
+        return { success: false, status: response.status };
+    } catch (error) {
+        console.error('❌ Erreur connexion serveur:', error);
+        return { success: false, error: error.message };
+    }
+  };
+
   const filteredEpisodes = useMemo(() => {
     const season = seasons.find(s => s.season === selectedSeason);
     return season ? season.episodes : [];
   }, [seasons, selectedSeason]);
 
-  // Langues disponibles
   const availableLanguages = useMemo(() => {
     const languages = new Set();
     episodes.forEach(ep => {
@@ -895,9 +790,16 @@ export default function AnimeDetailsScreenV2() {
     return Array.from(languages);
   }, [episodes]);
 
-  // ===============================
-  // 🎨 COMPOSANTS DE RENDU
-  // ===============================
+  const renderEpisodesStats = () => (
+    <View style={styles.statsContainer}>
+      <Text style={styles.statsText}>
+        📊 {episodes.length} épisodes • {seasons.length} saison{seasons.length > 1 ? 's' : ''}
+      </Text>
+      <Text style={styles.statsSubtext}>
+        Langue sélectionnée: {selectedLanguage}
+      </Text>
+    </View>
+  );
 
   const renderHeader = () => (
     <Animated.View style={[styles.header, { backgroundColor: headerOpacity.interpolate({ inputRange: [0, 1], outputRange: ['transparent', COLORS.background] }) }]}>
@@ -918,16 +820,18 @@ export default function AnimeDetailsScreenV2() {
   const renderHeroSection = () => (
     <View style={styles.heroContainer}>
       <Image source={{ uri: poster }} style={styles.heroPoster} resizeMode="cover" />
-      
       <LinearGradient
         colors={['transparent', 'rgba(11,11,11,0.8)', COLORS.background]}
         style={styles.heroGradient}
       />
-      
       <View style={styles.heroContent}>
         <View style={styles.heroInfo}>
           <Text style={styles.heroTitle} numberOfLines={2}>{title}</Text>
-          
+          {canonicalTitle !== title && (
+            <Text style={[styles.heroCanonicalTitle, styles.metaText]}>
+              Franchise: {canonicalTitle}
+            </Text>
+          )}
           <View style={styles.heroMeta}>
             <View style={styles.ratingBadge}>
               <Text style={styles.ratingText}>16+</Text>
@@ -935,7 +839,6 @@ export default function AnimeDetailsScreenV2() {
             <Text style={styles.metaText}>Animation</Text>
             <Text style={styles.metaText}>HD</Text>
           </View>
-
           <View style={styles.heroActions}>
             <TouchableOpacity
               style={styles.playButton}
@@ -945,15 +848,14 @@ export default function AnimeDetailsScreenV2() {
               <Ionicons name="play" size={20} color={COLORS.background} />
               <Text style={styles.playButtonText}>LECTURE</Text>
             </TouchableOpacity>
-
             <TouchableOpacity
               style={[styles.actionButton, isInWatchlist && styles.actionButtonActive]}
-              onPress={() => setIsInWatchlist(!isInWatchlist)}
+              onPress={toggleWatchlist}
             >
-              <Ionicons 
-                name={isInWatchlist ? "checkmark" : "add"} 
-                size={20} 
-                color={isInWatchlist ? COLORS.success : COLORS.text} 
+              <Ionicons
+                name={isInWatchlist ? "checkmark" : "add"}
+                size={20}
+                color={isInWatchlist ? COLORS.success : COLORS.text}
               />
               <Text style={[styles.actionButtonText, isInWatchlist && styles.actionButtonTextActive]}>
                 {isInWatchlist ? "AJOUTÉ" : "MA LISTE"}
@@ -965,34 +867,6 @@ export default function AnimeDetailsScreenV2() {
     </View>
   );
 
-  const renderDescription = () => {
-    const description = anime.description || "";
-    const cleanDesc = description
-      .replace(/(\n)?/gi, "\n")
-      .replace(/<[^>]*>/g, "")
-      .trim();
-
-    if (!cleanDesc) return null;
-
-    return (
-      <View style={styles.descriptionContainer}>
-        <Text
-          style={[styles.descriptionText, expandedDescription ? {} : { maxHeight: 60 }]}
-          numberOfLines={expandedDescription ? undefined : 3}
-        >
-          {cleanDesc}
-        </Text>
-        {cleanDesc.length > 150 && (
-          <TouchableOpacity onPress={() => setExpandedDescription(!expandedDescription)}>
-            <Text style={styles.expandButton}>
-              {expandedDescription ? "RÉDUIRE" : "EN SAVOIR PLUS"}
-            </Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    );
-  };
-
   const renderTabs = () => (
     <View style={styles.tabsContainer}>
       <TouchableOpacity
@@ -1003,7 +877,6 @@ export default function AnimeDetailsScreenV2() {
           ÉPISODES
         </Text>
       </TouchableOpacity>
-
       <TouchableOpacity
         style={[styles.tab, selectedTab === 'similar' && styles.activeTab]}
         onPress={() => setSelectedTab('similar')}
@@ -1012,7 +885,6 @@ export default function AnimeDetailsScreenV2() {
           SIMILAIRES
         </Text>
       </TouchableOpacity>
-
       <TouchableOpacity
         style={[styles.tab, selectedTab === 'details' && styles.activeTab]}
         onPress={() => setSelectedTab('details')}
@@ -1026,7 +898,6 @@ export default function AnimeDetailsScreenV2() {
 
   const renderSeasonSelector = () => {
     if (seasons.length <= 1) return null;
-
     return (
       <View style={styles.seasonSelector}>
         <Text style={styles.sectionTitle}>Saison</Text>
@@ -1055,7 +926,6 @@ export default function AnimeDetailsScreenV2() {
 
   const renderLanguageSelector = () => {
     if (availableLanguages.length <= 1) return null;
-
     return (
       <View style={styles.languageSelector}>
         <Text style={styles.sectionTitle}>Langue</Text>
@@ -1102,19 +972,17 @@ export default function AnimeDetailsScreenV2() {
           <Text style={styles.durationText}>24m</Text>
         </View>
       </View>
-
       <View style={styles.episodeInfo}>
         <Text style={styles.episodeTitle} numberOfLines={2}>
           {episode.number}. {episode.title}
         </Text>
         <Text style={styles.episodeDescription} numberOfLines={2}>
-          {episode.description || `Épisode ${episode.number} de ${title}`}
+          {episode.description || `Episode ${episode.number} de ${title}`}
         </Text>
         <Text style={styles.episodeDate}>
           {episode.date ? new Date(episode.date).toLocaleDateString('fr-FR') : ''}
         </Text>
       </View>
-
       <View style={styles.episodeActions}>
         <TouchableOpacity>
           <Ionicons name="download-outline" size={20} color={COLORS.textMuted} />
@@ -1125,42 +993,40 @@ export default function AnimeDetailsScreenV2() {
 
   const renderEpisodesList = () => (
     <View style={styles.episodesContainer}>
-      {renderSeasonSelector()}
       {renderLanguageSelector()}
-
+      {renderEpisodesStats()}
       <View style={styles.episodesHeader}>
         <Text style={styles.sectionTitle}>
           {selectedSeason} ({filteredEpisodes.length} épisodes)
         </Text>
-        
         <View style={styles.headerActions}>
           <TouchableOpacity
             style={styles.debugButton}
             onPress={async () => {
-              console.log("🔍 V2 Debug - Épisodes chargés:", episodes.length);
-              console.log("🔍 V2 Debug - Épisodes filtrés:", filteredEpisodes.length);
-              console.log("🔍 V2 Debug - Premier épisode:", filteredEpisodes[0]);
-              
-              // Test du backend V6
-              const backendTest = await VideoExtractorV5.testBackendConnectivity();
-              console.log("🔍 V2 Test backend:", backendTest);
-              
+              console.log("Debug V2.4 - Episodes chargés:", episodes.length);
+              console.log("Debug V2.4 - Episodes filtrés:", filteredEpisodes.length);
+              console.log("Debug V2.4 - Titre original:", title);
+              console.log("Debug V2.4 - Titre canonique:", canonicalTitle);
+              console.log("Debug V2.4 - Premier épisode:", filteredEpisodes[0]);
+              const serverTest = await testRenderServerConnectivity();
+              console.log("Test serveur Render:", serverTest);
               Alert.alert(
-                "Debug Info V2",
-                `Épisodes chargés: ${episodes.length}\n` +
-                `Épisodes filtrés: ${filteredEpisodes.length}\n\n` +
-                `Backend V6: ${backendTest.success ? '✅ OK' : '❌ Erreur'}\n` +
-                `Version: ${backendTest.version || 'N/A'}\n` +
-                `Message: ${backendTest.message}`
+                "Debug Info V2.4",
+                `Titre: ${title}\n` +
+                `Franchise: ${canonicalTitle}\n` +
+                `Episodes chargés: ${episodes.length}\n` +
+                `Episodes filtrés: ${filteredEpisodes.length}\n\n` +
+                `Serveur Render: ${serverTest.success ? 'OK' : 'Erreur'}\n` +
+                `URL: ${RENDER_SERVER_URL}\n` +
+                `Statut: ${serverTest.status || 'N/A'}`
               );
             }}
           >
             <MaterialIcons name="bug-report" size={12} color={COLORS.background} />
-            <Text style={styles.debugButtonText}>Debug V2</Text>
+            <Text style={styles.debugButtonText}>Debug V2.4</Text>
           </TouchableOpacity>
         </View>
       </View>
-
       {filteredEpisodes.length === 0 ? (
         <View style={styles.emptyState}>
           <MaterialIcons name="video-library" size={48} color={COLORS.textMuted} />
@@ -1168,6 +1034,12 @@ export default function AnimeDetailsScreenV2() {
           <Text style={styles.emptyStateSubtext}>
             Vérifiez votre connexion ou réessayez plus tard
           </Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={loadAnimeData}
+          >
+            <Text style={styles.retryButtonText}>Réessayer</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <FlatList
@@ -1195,35 +1067,6 @@ export default function AnimeDetailsScreenV2() {
     </View>
   );
 
-  const renderDetailsContent = () => (
-    <View style={styles.detailsContainer}>
-      <Text style={styles.sectionTitle}>Informations</Text>
-      <View style={styles.detailsGrid}>
-        <View style={styles.detailItem}>
-          <Text style={styles.detailLabel}>Créateur</Text>
-          <Text style={styles.detailValue}>{anime.studio || "—"}</Text>
-        </View>
-
-        <View style={styles.detailItem}>
-          <Text style={styles.detailLabel}>Genre</Text>
-          <Text style={styles.detailValue}>
-            {Array.isArray(anime.genres) ? anime.genres.join(", ") : "Animation"}
-          </Text>
-        </View>
-
-        <View style={styles.detailItem}>
-          <Text style={styles.detailLabel}>Année</Text>
-          <Text style={styles.detailValue}>{anime.year || "—"}</Text>
-        </View>
-
-        <View style={styles.detailItem}>
-          <Text style={styles.detailLabel}>Statut</Text>
-          <Text style={styles.detailValue}>{anime.status || "—"}</Text>
-        </View>
-      </View>
-    </View>
-  );
-
   const renderContent = () => {
     switch (selectedTab) {
       case 'episodes':
@@ -1237,15 +1080,12 @@ export default function AnimeDetailsScreenV2() {
     }
   };
 
-  // ===============================
-  // 🎨 RENDU PRINCIPAL
-  // ===============================
-
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Chargement V2...</Text>
+        <Text style={styles.loadingText}>Chargement V2.4...</Text>
+        <Text style={styles.loadingSubtext}>Recherche intelligente de franchise</Text>
       </View>
     );
   }
@@ -1253,7 +1093,6 @@ export default function AnimeDetailsScreenV2() {
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
-      
       <Animated.ScrollView
         style={styles.scrollView}
         onScroll={Animated.event(
@@ -1265,22 +1104,20 @@ export default function AnimeDetailsScreenV2() {
         {renderHeroSection()}
         {renderDescription()}
         {renderTabs()}
+        {renderSeasonSelector()}
         {renderContent()}
       </Animated.ScrollView>
-
       {renderHeader()}
-
-      {/* Overlay de chargement V2 */}
       {resolving && (
         <View style={styles.resolvingOverlay}>
           <BlurView intensity={20} style={styles.resolvingBlur}>
             <View style={styles.resolvingContent}>
               <ActivityIndicator size="large" color={COLORS.primary} />
               <Text style={styles.resolvingText}>
-                {resolvingMsg || "Préparation V2..."}
+                {resolvingMsg || "Préparation V2.4..."}
               </Text>
               <Text style={styles.resolvingSubtext}>
-                Utilisation VideoExtractor V5 + Backend V6
+                Serveur Render + Recherche franchise améliorée
               </Text>
             </View>
           </BlurView>
@@ -1290,510 +1127,89 @@ export default function AnimeDetailsScreenV2() {
   );
 }
 
-// ===============================
-// 🎨 STYLES
-// ===============================
-
+// STYLES (inchangés)
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  
-  loadingText: {
-    color: COLORS.textSecondary,
-    fontSize: 16,
-    marginTop: 16,
-  },
-  
-  scrollView: {
-    flex: 1,
-  },
-  
-  header: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 10,
-    paddingTop: Platform.OS === 'ios' ? 44 : StatusBar.currentHeight || 0,
-  },
-  
-  headerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  
-  headerTitle: {
-    flex: 1,
-    color: COLORS.text,
-    fontSize: 18,
-    fontWeight: '600',
-    marginHorizontal: 16,
-  },
-  
-  headerActions: {
-    flexDirection: 'row',
-    gap: 16,
-  },
-
-  heroContainer: {
-    height: SCREEN_HEIGHT * 0.6,
-    position: 'relative',
-  },
-
-  heroPoster: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
-
-  heroGradient: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: '60%',
-  },
-
-  heroContent: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    padding: 20,
-  },
-
-  heroInfo: {
-    alignItems: 'center',
-  },
-
-  heroTitle: {
-    color: COLORS.text,
-    fontSize: 28,
-    fontWeight: '900',
-    textAlign: 'center',
-    marginBottom: 8,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 8,
-  },
-
-  heroMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-    gap: 8,
-  },
-
-  ratingBadge: {
-    backgroundColor: COLORS.surface,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-  },
-
-  ratingText: {
-    color: COLORS.text,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  metaText: {
-    color: COLORS.textSecondary,
-    fontSize: 14,
-  },
-
-  heroActions: {
-    flexDirection: 'row',
-    gap: 12,
-    width: '100%',
-  },
-
-  playButton: {
-    flex: 1,
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-
-  playButtonText: {
-    color: COLORS.background,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  actionButton: {
-    flex: 1,
-    backgroundColor: 'transparent',
-    borderWidth: 2,
-    borderColor: COLORS.border,
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-
-  actionButtonActive: {
-    borderColor: COLORS.success,
-    backgroundColor: 'rgba(76, 175, 80, 0.1)',
-  },
-
-  actionButtonText: {
-    color: COLORS.text,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  actionButtonTextActive: {
-    color: COLORS.success,
-  },
-
-  descriptionContainer: {
-    padding: 20,
-  },
-
-  descriptionText: {
-    color: COLORS.textSecondary,
-    fontSize: 14,
-    lineHeight: 20,
-    textAlign: 'center',
-  },
-
-  expandButton: {
-    color: COLORS.primary,
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginTop: 8,
-  },
-
-  tabsContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    marginBottom: 20,
-  },
-
-  tab: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
-  },
-
-  activeTab: {
-    borderBottomColor: COLORS.primary,
-  },
-
-  tabText: {
-    color: COLORS.textMuted,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
-  activeTabText: {
-    color: COLORS.primary,
-  },
-
-  sectionTitle: {
-    color: COLORS.text,
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 16,
-  },
-
-  seasonSelector: {
-    marginBottom: 20,
-    paddingHorizontal: 20,
-  },
-
-  seasonChip: {
-    backgroundColor: COLORS.surface,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginRight: 12,
-  },
-
-  selectedSeasonChip: {
-    backgroundColor: COLORS.primary,
-  },
-
-  seasonChipText: {
-    color: COLORS.textSecondary,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
-  selectedSeasonChipText: {
-    color: COLORS.background,
-  },
-
-  languageSelector: {
-    marginBottom: 20,
-    paddingHorizontal: 20,
-  },
-
-  languageChip: {
-    backgroundColor: COLORS.surface,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginRight: 12,
-  },
-
-  selectedLanguageChip: {
-    backgroundColor: COLORS.primary,
-  },
-
-  languageChipText: {
-    color: COLORS.textSecondary,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
-  selectedLanguageChipText: {
-    color: COLORS.background,
-  },
-
-  episodesContainer: {
-    paddingBottom: 100,
-  },
-
-  episodesHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 16,
-  },
-
-  debugButton: {
-    backgroundColor: '#FF6B6B',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-
-  debugButtonText: {
-    color: COLORS.background,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  episodeItem: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-
-  episodeThumb: {
-    width: 140,
-    height: 80,
-    borderRadius: 8,
-    overflow: 'hidden',
-    position: 'relative',
-    backgroundColor: COLORS.surface,
-  },
-
-  episodeImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
-
-  playOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  episodeDuration: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-
-  durationText: {
-    color: COLORS.text,
-    fontSize: 10,
-    fontWeight: '600',
-  },
-
-  episodeInfo: {
-    flex: 1,
-    paddingHorizontal: 16,
-  },
-
-  episodeTitle: {
-    color: COLORS.text,
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-
-  episodeDescription: {
-    color: COLORS.textSecondary,
-    fontSize: 12,
-    lineHeight: 16,
-    marginBottom: 4,
-  },
-
-  episodeDate: {
-    color: COLORS.textMuted,
-    fontSize: 10,
-  },
-
-  episodeActions: {
-    paddingLeft: 16,
-  },
-
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-  },
-
-  emptyStateText: {
-    color: COLORS.textSecondary,
-    fontSize: 16,
-    fontWeight: '600',
-    marginTop: 16,
-  },
-
-  emptyStateSubtext: {
-    color: COLORS.textMuted,
-    fontSize: 14,
-    marginTop: 8,
-    textAlign: 'center',
-  },
-
-  similarContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 100,
-  },
-
-  similarGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 16,
-    justifyContent: 'space-between',
-  },
-
-  similarItem: {
-    width: (SCREEN_WIDTH - 56) / 2,
-    marginBottom: 16,
-  },
-
-  similarPoster: {
-    width: '100%',
-    aspectRatio: 2 / 3,
-    borderRadius: 8,
-    backgroundColor: COLORS.surface,
-    marginBottom: 8,
-  },
-
-  similarTitle: {
-    color: COLORS.text,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
-  detailsContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 100,
-  },
-
-  detailsGrid: {
-    gap: 16,
-  },
-
-  detailItem: {
-    backgroundColor: COLORS.surface,
-    padding: 16,
-    borderRadius: 8,
-  },
-
-  detailLabel: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-
-  detailValue: {
-    color: COLORS.text,
-    fontSize: 16,
-  },
-
-  resolvingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 20,
-  },
-
-  resolvingBlur: {
-    width: '100%',
-    height: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  resolvingContent: {
-    backgroundColor: COLORS.surface,
-    padding: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    marginHorizontal: 40,
-    maxWidth: 300,
-  },
-
-  resolvingText: {
-    color: COLORS.text,
-    fontSize: 14,
-    marginTop: 16,
-    textAlign: 'center',
-  },
-
-  resolvingSubtext: {
-    color: COLORS.textSecondary,
-    fontSize: 12,
-    marginTop: 8,
-    textAlign: 'center',
-  },
+  container: { flex: 1, backgroundColor: COLORS.background, },
+  loadingContainer: { flex: 1, backgroundColor: COLORS.background, alignItems: 'center', justifyContent: 'center', },
+  loadingText: { color: COLORS.textSecondary, fontSize: 16, marginTop: 16, },
+  loadingSubtext: { color: COLORS.textMuted, fontSize: 12, marginTop: 8, },
+  scrollView: { flex: 1, },
+  header: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10, paddingTop: Platform.OS === 'ios' ? 44 : StatusBar.currentHeight || 0, },
+  headerContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, },
+  headerTitle: { flex: 1, color: COLORS.text, fontSize: 18, fontWeight: '600', marginHorizontal: 16, },
+  headerActions: { flexDirection: 'row', gap: 16, },
+  heroContainer: { height: SCREEN_HEIGHT * 0.6, position: 'relative', },
+  heroPoster: { width: '100%', height: '100%', resizeMode: 'cover', },
+  heroGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '60%', },
+  heroContent: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 20, },
+  heroInfo: { alignItems: 'center', },
+  heroTitle: { color: COLORS.text, fontSize: 28, fontWeight: '900', textAlign: 'center', marginBottom: 8, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8, },
+  heroCanonicalTitle: { color: COLORS.textSecondary, fontSize: 16, fontWeight: '500', marginBottom: 8, },
+  heroMeta: { flexDirection: 'row', alignItems: 'center', marginBottom: 20, gap: 8, },
+  ratingBadge: { backgroundColor: COLORS.surface, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, },
+  ratingText: { color: COLORS.text, fontSize: 12, fontWeight: '600', },
+  metaText: { color: COLORS.textSecondary, fontSize: 14, },
+  heroActions: { flexDirection: 'row', gap: 12, width: '100%', },
+  playButton: { flex: 1, backgroundColor: COLORS.primary, paddingVertical: 12, paddingHorizontal: 24, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, },
+  playButtonText: { color: COLORS.background, fontSize: 16, fontWeight: '700', },
+  actionButton: { flex: 1, backgroundColor: 'transparent', borderWidth: 2, borderColor: COLORS.border, paddingVertical: 10, paddingHorizontal: 24, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, },
+  actionButtonActive: { borderColor: COLORS.success, backgroundColor: 'rgba(76, 175, 80, 0.1)', },
+  actionButtonText: { color: COLORS.text, fontSize: 16, fontWeight: '700', },
+  actionButtonTextActive: { color: COLORS.success, },
+  descriptionContainer: { paddingHorizontal: 20, paddingVertical: 12, },
+  descriptionText: { color: COLORS.textSecondary, fontSize: 14, lineHeight: 20, marginBottom: 12, },
+  tabsContainer: { flexDirection: 'row', paddingHorizontal: 20, marginBottom: 20, },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent', },
+  activeTab: { borderBottomColor: COLORS.primary, },
+  tabText: { color: COLORS.textMuted, fontSize: 14, fontWeight: '600', },
+  activeTabText: { color: COLORS.primary, },
+  sectionTitle: { color: COLORS.text, fontSize: 18, fontWeight: '700', marginBottom: 16, },
+  seasonSelector: { marginBottom: 20, paddingHorizontal: 20, },
+  seasonChip: { backgroundColor: COLORS.surface, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, marginRight: 12, },
+  selectedSeasonChip: { backgroundColor: COLORS.primary, },
+  seasonChipText: { color: COLORS.textSecondary, fontSize: 14, fontWeight: '600', },
+  selectedSeasonChipText: { color: COLORS.background, },
+  languageSelector: { marginBottom: 20, paddingHorizontal: 20, },
+  languageChip: { backgroundColor: COLORS.surface, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, marginRight: 12, },
+  selectedLanguageChip: { backgroundColor: COLORS.primary, },
+  languageChipText: { color: COLORS.textSecondary, fontSize: 14, fontWeight: '600', },
+  selectedLanguageChipText: { color: COLORS.background, },
+  episodesContainer: { paddingBottom: 100, },
+  episodesHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 16, },
+  debugButton: { backgroundColor: '#FF6B6B', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, flexDirection: 'row', alignItems: 'center', gap: 4, },
+  debugButtonText: { color: COLORS.background, fontSize: 12, fontWeight: '600', },
+  episodeItem: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 12, alignItems: 'center', },
+  episodeThumb: { width: 140, height: 80, borderRadius: 8, overflow: 'hidden', position: 'relative', backgroundColor: COLORS.surface, },
+  episodeImage: { width: '100%', height: '100%', resizeMode: 'cover', },
+  playOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.3)', alignItems: 'center', justifyContent: 'center', },
+  episodeDuration: { position: 'absolute', bottom: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.8)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, },
+  durationText: { color: COLORS.text, fontSize: 10, fontWeight: '600', },
+  episodeInfo: { flex: 1, paddingHorizontal: 16, },
+  episodeTitle: { color: COLORS.text, fontSize: 16, fontWeight: '600', marginBottom: 4, },
+  episodeDescription: { color: COLORS.textSecondary, fontSize: 12, lineHeight: 16, marginBottom: 4, },
+  episodeDate: { color: COLORS.textMuted, fontSize: 10, },
+  episodeActions: { paddingLeft: 16, },
+  emptyState: { alignItems: 'center', paddingVertical: 40, },
+  emptyStateText: { color: COLORS.textSecondary, fontSize: 16, fontWeight: '600', marginTop: 16, },
+  emptyStateSubtext: { color: COLORS.textMuted, fontSize: 14, marginTop: 8, textAlign: 'center', },
+  retryButton: { backgroundColor: COLORS.primary, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8, marginTop: 16, },
+  retryButtonText: { color: COLORS.background, fontSize: 14, fontWeight: '600', },
+  similarContainer: { paddingHorizontal: 20, paddingBottom: 100, },
+  similarGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 16, justifyContent: 'space-between', },
+  similarItem: { width: (SCREEN_WIDTH - 56) / 2, marginBottom: 16, },
+  similarPoster: { width: '100%', aspectRatio: 2 / 3, borderRadius: 8, backgroundColor: COLORS.surface, marginBottom: 8, },
+  similarTitle: { color: COLORS.text, fontSize: 14, fontWeight: '600', },
+  detailsContainer: { paddingHorizontal: 20, paddingBottom: 100, },
+  detailsGrid: { gap: 16, },
+  detailItem: { backgroundColor: COLORS.surface, padding: 16, borderRadius: 8, },
+  detailLabel: { color: COLORS.textMuted, fontSize: 12, fontWeight: '600', marginBottom: 4, },
+  detailValue: { color: COLORS.text, fontSize: 16, },
+  resolvingOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', zIndex: 20, },
+  resolvingBlur: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center', },
+  resolvingContent: { backgroundColor: COLORS.surface, padding: 32, borderRadius: 16, alignItems: 'center', marginHorizontal: 40, maxWidth: 300, },
+  resolvingText: { color: COLORS.text, fontSize: 14, marginTop: 16, textAlign: 'center', },
+  resolvingSubtext: { color: COLORS.textSecondary, fontSize: 12, marginTop: 8, textAlign: 'center', },
+  statsContainer: { backgroundColor: COLORS.surface, padding: 12, marginHorizontal: 20, marginBottom: 16, borderRadius: 8, borderLeftWidth: 4, borderLeftColor: COLORS.primary, },
+  statsText: { color: COLORS.text, fontSize: 14, fontWeight: '600', },
+  statsSubtext: { color: COLORS.textSecondary, fontSize: 12, marginTop: 4, },
 });

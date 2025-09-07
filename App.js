@@ -59,7 +59,7 @@ function MainTabs({ showTabs }) {
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Browse" component={BrowseScreen} />
-      <Tab.Screen name="My List" component={MyListScreen} />
+      <Tab.Screen name="MyList" component={MyListScreen} options={{ title: 'My List' }} />
       <Tab.Screen name="Account" component={AccountScreen} />
     </Tab.Navigator>
   );

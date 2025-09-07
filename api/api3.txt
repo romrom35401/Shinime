@@ -16,7 +16,7 @@ import { db } from "./firebaseConfig";
 // ====== Configuration optimisée ======
 const bannedGenres = new Set(["Hentai", "Doujin", "Experimental", "Special", "Erotica"]);
 const bannedWordsSet = new Set([
-  "hentai", "doujin", "nsfw", "haha", "no te", "musume", "kami", "omake",
+  "hentai", "doujin", "nsfw", "haha", "no te", "musume", "kami", "omake", 
   "one te", "oneshot", "music video", "pv", "promo", "commercial"
 ]);
 const allowedFormats = new Set(["TV", "TV_SHORT", "ONA"]);
@@ -48,7 +48,7 @@ function toAsciiLower(str) {
 function cleanBaseTitle(str) {
   if (typeof str !== 'string') return '';
   if (!str) return str;
-
+  
   return str
     .replace(/\s*\(\d{4}\)\s*$/, '')
     .replace(/\b(2011|1999|brotherhood|crystal|z|kai|super|remake|next generations)\b/gi, '')
@@ -63,7 +63,7 @@ function cleanBaseTitle(str) {
 
 function normalizeTitleForSeasonKey(title) {
   if (typeof title !== "string" || !title.trim()) return "";
-
+  
   if (titleNormalizationCache.has(title)) {
     return titleNormalizationCache.get(title);
   }
@@ -85,7 +85,7 @@ function normalizeTitleForSeasonKey(title) {
     .replace(/[:\-–—_]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-
+  
   const result = s.split(/[-\s]+/).filter(Boolean).join("-");
   titleNormalizationCache.set(title, result);
   return result;
@@ -123,7 +123,7 @@ const ANIME_SAMA_INDEX = ANIME_SAMA_IDS.map(id => {
 
 function findBestAnimeSamaMatch(title, { minScore = 60, limit = 1 } = {}) {
   if (!title) return null;
-
+  
   const cacheKey = `${title}-${minScore}-${limit}`;
   if (animeSamaMatchCache.has(cacheKey)) {
     return animeSamaMatchCache.get(cacheKey);
@@ -144,7 +144,7 @@ function findBestAnimeSamaMatch(title, { minScore = 60, limit = 1 } = {}) {
   }
 
   results.sort((a, b) => b.score - a.score);
-  const unique = results.filter((item, index, arr) =>
+  const unique = results.filter((item, index, arr) => 
     arr.findIndex(x => x.id === item.id) === index
   );
 
@@ -155,11 +155,11 @@ function findBestAnimeSamaMatch(title, { minScore = 60, limit = 1 } = {}) {
 
 function calculateSimilarityScore(a, b) {
   if (a === b) return 100;
-
+  
   const aTokens = a.split('-');
   const bTokens = b.split('-');
   const intersection = aTokens.filter(token => bTokens.includes(token));
-
+  
   const jaccard = intersection.length / Math.max(1, aTokens.length + bTokens.length - intersection.length);
   return Math.round(jaccard * 100);
 }
@@ -182,13 +182,13 @@ function pickTitle(anime) {
 function isAcceptableAnime(anime) {
   const format = anime?.format || anime?.type;
   if (!allowedFormats.has(format)) return false;
-
+  
   const isAdult = anime?.isAdult || (anime.rating || '').includes('Hentai') || (anime.rating || '').includes('Rx');
   if (isAdult) return false;
-
+  
   const genres = anime?.genres || [];
   if (genres.some(g => bannedGenres.has(g))) return false;
-
+  
   const titlesPool = [
     pickTitle(anime),
     anime?.title_english,
@@ -196,9 +196,9 @@ function isAcceptableAnime(anime) {
     ...(anime?.title_synonyms || []),
     ...(anime?.synonyms || []),
   ].filter(Boolean).join(" ").toLowerCase();
-
+  
   if ([...bannedWordsSet].some(w => titlesPool.includes(w))) return false;
-
+  
   const score = anime?.averageScore || (anime.score * 10);
   if (typeof score === "number" && score < 60) return false;
 
@@ -221,7 +221,6 @@ const OPTIMIZED_ANILIST_QUERY = `
         averageScore
         isAdult
         genres
-        description
       }
     }
   }
@@ -238,13 +237,13 @@ async function fetchAniListGroupedAnimes(variables = {}) {
         ...variables
       }
     };
-
+    
     const response = await fetch(ANILIST_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify(payload),
     });
-
+    
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
     const data = await response.json();
@@ -255,7 +254,7 @@ async function fetchAniListGroupedAnimes(variables = {}) {
 
     const media = data?.data?.Page?.media || [];
     const grouped = groupAnimeByFranchiseClean(media);
-
+    
     // Injection des descriptions Firebase en parallèle
     await injectDescriptionsFromFirebase(grouped);
     return grouped;
@@ -282,8 +281,8 @@ async function fetchFirebaseDocByTitles(titles = [], collectionName = "animes") 
     for (let i = 0; i < normed.length; i += 10) {
       const batch = normed.slice(i, i + 10);
       const q = query(
-        collection(db, collectionName),
-        where("normalized", "in", batch),
+        collection(db, collectionName), 
+        where("normalized", "in", batch), 
         qLimit(1)
       );
       const snap = await getDocs(q);
@@ -299,8 +298,8 @@ async function fetchFirebaseDocByTitles(titles = [], collectionName = "animes") 
     for (let i = 0; i < variants.length; i += 10) {
       const batch = variants.slice(i, i + 10);
       const q = query(
-        collection(db, collectionName),
-        where("titlesAll", "array-contains-any", batch),
+        collection(db, collectionName), 
+        where("titlesAll", "array-contains-any", batch), 
         qLimit(1)
       );
       const snap = await getDocs(q);
@@ -320,70 +319,46 @@ async function fetchFirebaseDocByTitles(titles = [], collectionName = "animes") 
 }
 
 async function injectDescriptionsFromFirebase(items = []) {
-  // Helper pour nettoyer les descriptions (enlève balises HTML + espaces multiples)
-  const cleanDesc = (str) =>
-    String(str || "")
-      .replace(/<\/?[^>]+(>|$)/g, "") // 🔥 supprime les balises HTML
-      .replace(/\s+/g, " ")           // normalise les espaces
-      .trim();
-
   // Traitement par lot pour optimiser les requêtes
   const batchSize = 5;
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
-    await Promise.all(
-      batch.map(async (item) => {
-        const titles = [
-          item.title,
-          item.title_en,
-          item.title_romaji,
-          ...(item.synonyms || []),
-          ...(item.title_variants || []),
-        ].filter(Boolean);
+    await Promise.all(batch.map(async (item) => {
+      const titles = [
+        item.title,
+        item.title_en,
+        item.title_romaji,
+        ...(item.synonyms || []),
+        ...(item.title_variants || []),
+      ].filter(Boolean);
 
-        if (titles.length === 0) return;
+      if (titles.length === 0) return;
 
-        const docData = await fetchFirebaseDocByTitles(titles);
-        if (docData) {
-          const frDesc =
-            docData?.description ||
-            docData?.synopsis ||
-            docData?.synopsys ||
-            docData?.resume;
-
-          if (frDesc) {
-            item.description = cleanDesc(frDesc); // ✅ description FR propre
-          }
-          item._matchedDocId = docData.id;
+      const docData = await fetchFirebaseDocByTitles(titles);
+      if (docData) {
+        const frDesc = docData?.description || docData?.synopsis || docData?.synopsys || docData?.resume;
+        if (frDesc) {
+          item.description = frDesc;
         }
-
-        // ⚠️ Fallback : si Firebase n’a rien → AniList ou défaut
-        if (!item.description) {
-          item.description = cleanDesc(
-            item?.description ||
-              item?.synopsis ||
-              "Aucune description disponible."
-          );
-        }
-      })
-    );
+        item._matchedDocId = docData.id;
+      }
+    }));
   }
 }
-
 
 // ========== Groupement optimisé ==========
 function groupAnimeByFranchiseClean(animeList) {
   const groups = new Map();
-
+  
   animeList.forEach(anime => {
     try {
       if (!isAcceptableAnime(anime)) return;
-
+      
       const baseTitle = cleanBaseTitle(pickTitle(anime));
       const normalizedBase = normalizeTitleForSeasonKey(baseTitle);
-
+      
       if (!normalizedBase) return;
-
+      
       if (!groups.has(normalizedBase)) {
         groups.set(normalizedBase, []);
       }
@@ -392,27 +367,27 @@ function groupAnimeByFranchiseClean(animeList) {
       console.warn('groupAnimeByFranchiseClean: skipping anime due to error', err);
     }
   });
-
+  
   return Array.from(groups.entries()).map(([normalizedBase, items]) => {
     // Tri optimisé pour prioriser la série principale
     const representative = items.reduce((best, current) => {
       const bestFormat = best.format || best.type;
       const currentFormat = current.format || current.type;
-
+      
       // Prioriser TV
       if (currentFormat === 'TV' && bestFormat !== 'TV') return current;
       if (bestFormat === 'TV' && currentFormat !== 'TV') return best;
-
+      
       // Prioriser popularité
       const bestPop = best.popularity || 0;
       const currentPop = current.popularity || 0;
       return currentPop > bestPop ? current : best;
     });
-
+    
     if (!representative) return null;
-
+    
     const images = getBestImageUrl(representative.coverImage, representative.bannerImage);
-
+    
     return {
       id: `AL-${representative.id}-${normalizedBase}`,
       sourceId: representative.id,
@@ -421,7 +396,7 @@ function groupAnimeByFranchiseClean(animeList) {
       title: representative?.title?.english || representative?.title?.romaji || representative?.title?.native || "Sans titre",
       title_en: representative?.title?.english,
       title_romaji: representative?.title?.romaji,
-      description: representative?.description, // description from AniList
+      description: representative?.description,
       posterImage: images.poster,
       bannerImage: images.banner,
       coverImage: images.poster,
@@ -431,8 +406,6 @@ function groupAnimeByFranchiseClean(animeList) {
       averageScore: representative?.averageScore,
       popularity: representative?.popularity,
       franchiseCount: items.length,
-      year: representative?.seasonYear,
-      status: representative?.status,
     };
   }).filter(Boolean);
 }
@@ -456,11 +429,11 @@ export async function fetchCurrentSeasonGrouped(limit = 12) {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
-
-  const season = month <= 3 ? "WINTER" :
-                month <= 6 ? "SPRING" :
+  
+  const season = month <= 3 ? "WINTER" : 
+                month <= 6 ? "SPRING" : 
                 month <= 9 ? "SUMMER" : "FALL";
-
+  
   return fetchAniListGroupedAnimes({
     season,
     seasonYear: year,
@@ -479,18 +452,18 @@ export async function fetchMustWatch(limit = 12) {
 export async function fetchAnimes(limit = 30) {
   try {
     const qRef = query(
-      collection(db, "animes"),
-      orderBy("popularity", "desc"),
+      collection(db, "animes"), 
+      orderBy("popularity", "desc"), 
       qLimit(Math.min(limit * 2, 100))
     );
-
+    
     const snap = await getDocs(qRef);
     const items = [];
     snap.forEach(doc => items.push({
       id: doc.id,
       ...doc.data()
     }));
-
+    
     return items.slice(0, limit);
   } catch (error) {
     console.error("fetchAnimes error:", error);
@@ -515,33 +488,6 @@ export async function fetchEpisodesGroupedBySeason(titleOrAnime) {
   return fetchEpisodesByTitle(titleOrAnime, { grouped: true });
 }
 
-// NOUVELLE FONCTION AJOUTÉE
-export async function fetchFranchiseDetails(title) {
-  if (!title) return null;
-  try {
-    console.log(`[api.js] Recherche des détails de la franchise pour: "${title}"`);
-    const searchResults = await fetchAniListGroupedAnimes({
-      search: title,
-      perPage: 5, // On récupère quelques résultats pour assurer la pertinence
-      sort: "SEARCH_MATCH"
-    });
-
-    if (!searchResults || searchResults.length === 0) {
-      console.warn(`[api.js] Aucune franchise trouvée pour "${title}"`);
-      return null;
-    }
-
-    // Le premier résultat est le plus pertinent grâce au tri "SEARCH_MATCH"
-    const franchise = searchResults[0];
-    console.log(`[api.js] ✅ Franchise représentative trouvée: ${franchise.title}`);
-    return franchise;
-
-  } catch (error) {
-    console.error(`[api.js] Erreur dans fetchFranchiseDetails pour "${title}":`, error);
-    return null;
-  }
-}
-
 // Fonctions utilitaires exportées
 export {
   findBestAnimeSamaMatch,
@@ -562,18 +508,18 @@ function generateAliases(title) {
   // Version simplifiée mais efficace
   const base = toAsciiLower(title).trim();
   const aliases = new Set([base]);
-
+  
   // Nettoyage des éléments de saison
   const cleaned = base
     .replace(/\b(saison|season|partie|part|cour|arc)\s*\d+\b/gi, "")
     .replace(/\b(tv|movie|film|ova|special)\b/gi, "")
     .trim();
-
+  
   if (cleaned && cleaned !== base) {
     aliases.add(cleaned);
   }
-
-  return Array.from(aliases).map(alias =>
+  
+  return Array.from(aliases).map(alias => 
     alias.split(/[-\s]+/).filter(Boolean).join("-")
   ).filter(Boolean);
 }
@@ -581,7 +527,7 @@ function generateAliases(title) {
 function testMatching() {
   const testTitles = [
     "Hunter x Hunter",
-    "Jujutsu Kaisen",
+    "Jujutsu Kaisen", 
     "Attack on Titan",
     "Demon Slayer",
     "One Piece",

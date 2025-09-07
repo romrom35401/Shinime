@@ -1,0 +1,456 @@
+from flask import Flask, request, jsonify, Response, stream_template
+import os
+import json
+import logging
+import time
+import random
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+import requests
+import yt_dlp
+from threading import Thread, Lock
+import traceback
+from functools import lru_cache
+import sys
+from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_cors import CORS
+
+# Configuration optimisée pour Render + Streaming
+# Configuration pour Render
+app = Flask(__name__)
+app.config['JSON_SORT_KEYS'] = False
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# CORS pour Expo
+CORS(app, origins=["*"])
+
+# Logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+
+# --- Cache optimisé avec LRU ---
+class FastCache:
+    def __init__(self, max_size=500, ttl_seconds=1800):
+        self.cache = {}
+        self.access_times = {}
+        self.max_size = max_size
+        self.ttl = ttl_seconds
+        self.lock = Lock()
+    
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
+                data, timestamp = self.cache[key]
+                if time.time() - timestamp < self.ttl:
+                    self.access_times[key] = time.time()
+                    return data
+                else:
+                    self._remove_key(key)
+        return None
+    
+    def set(self, key, value):
+        with self.lock:
+            current_time = time.time()
+            
+            if len(self.cache) >= self.max_size:
+                self._cleanup()
+            
+            self.cache[key] = (value, current_time)
+            self.access_times[key] = current_time
+    
+    def _remove_key(self, key):
+        self.cache.pop(key, None)
+        self.access_times.pop(key, None)
+    
+    def _cleanup(self):
+        if not self.access_times:
+            return
+        
+        sorted_keys = sorted(self.access_times.items(), key=lambda x: x[1])
+        to_remove = len(sorted_keys) // 4
+        
+        for key, _ in sorted_keys[:to_remove]:
+            self._remove_key(key)
+
+url_cache = FastCache()
+
+class VideoStreamExtractor:
+    """Extracteur optimisé pour streaming direct vers Expo"""
+    
+    def __init__(self):
+        self.user_agents = [
+            "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1"
+        ]
+        self.session = requests.Session()
+        self.session.mount('http://', requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20))
+        self.session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20))
+        
+        self.executor = ThreadPoolExecutor(max_workers=3)
+        self.proxies = []
+        self.proxies_ready = False
+        self.load_basic_proxies()
+    
+    def load_basic_proxies(self):
+        """Chargement rapide de proxies basiques"""
+        def load():
+            try:
+                basic_proxies = [
+                    "http://8.210.83.33:80",
+                    "http://47.74.152.29:8888",
+                    "http://138.68.60.8:8080"
+                ]
+                self.proxies = basic_proxies
+                self.proxies_ready = True
+            except:
+                self.proxies_ready = True
+        
+        Thread(target=load, daemon=True).start()
+    
+    @lru_cache(maxsize=100)
+    def get_domain_config(self, domain):
+        """Configuration mise en cache par domaine"""
+        config = {
+            "timeout": 15,
+            "retries": 2,
+            "format": "best[ext=mp4][height<=720]/best[ext=mp4]/best"
+        }
+        
+        if "youtube.com" in domain or "youtu.be" in domain:
+            config["format"] = "best[ext=mp4][height<=720]/worstvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
+            config["timeout"] = 25
+        elif "vimeo.com" in domain:
+            config["format"] = "best[ext=mp4]"
+        elif any(x in domain for x in ["dailymotion", "twitch"]):
+            config["timeout"] = 30
+        
+        return config
+    
+    def get_optimized_ydl_opts(self, url, use_proxy=False):
+        """Options yt-dlp optimisées pour mobile"""
+        domain = urlparse(url).hostname or ""
+        config = self.get_domain_config(domain)
+        
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "skip_download": True,
+            "format": config["format"],
+            "socket_timeout": config["timeout"],
+            "retries": config["retries"],
+            "nocheckcertificate": True,
+            "geo_bypass": True,
+            "simulate": True,
+            "http_headers": {
+                "User-Agent": random.choice(self.user_agents),
+                "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive"
+            }
+        }
+        
+        if use_proxy and self.proxies_ready and self.proxies:
+            opts["proxy"] = random.choice(self.proxies)
+        
+        return opts
+    
+    def extract_direct(self, url, use_proxy=False):
+        """Extraction directe optimisée pour MP4"""
+        ydl_opts = self.get_optimized_ydl_opts(url, use_proxy)
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    return None
+                
+                # Priorité aux formats MP4
+                video_url = None
+                video_format = None
+                
+                if info.get("formats"):
+                    # Chercher le meilleur format MP4
+                    mp4_formats = [f for f in info["formats"] 
+                                 if f.get("ext") == "mp4" and f.get("url")]
+                    
+                    if mp4_formats:
+                        # Prendre le format avec la meilleure qualité <= 720p
+                        mp4_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
+                        for fmt in mp4_formats:
+                            if fmt.get("height", 999) <= 720:
+                                video_url = fmt["url"]
+                                video_format = fmt
+                                break
+                        
+                        if not video_url:
+                            video_url = mp4_formats[0]["url"]
+                            video_format = mp4_formats[0]
+                
+                # Fallback sur l'URL principale
+                if not video_url:
+                    video_url = info.get("url")
+                
+                if video_url:
+                    return {
+                        "success": True,
+                        "url": video_url,
+                        "is_hls": ".m3u8" in video_url,
+                        "is_mp4": video_url.endswith(".mp4") or (video_format and video_format.get("ext") == "mp4"),
+                        "title": info.get("title", "Video")[:100],
+                        "duration": info.get("duration"),
+                        "thumbnail": info.get("thumbnail"),
+                        "quality": video_format.get("height") if video_format else None,
+                        "filesize": video_format.get("filesize") if video_format else None,
+                        "site": urlparse(url).hostname
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Direct extraction failed: {str(e)[:100]}")
+            raise
+        
+        return None
+    
+    def extract_with_cobalt_fast(self, url):
+        """Version rapide de Cobalt API pour MP4"""
+        try:
+            payload = {
+                "url": url,
+                "vQuality": "720",
+                "vCodec": "h264",
+                "vFormat": "mp4",
+                "isAudioOnly": False
+            }
+            
+            response = self.session.post(
+                "https://co.wuk.sh/api/json",
+                json=payload,
+                timeout=15,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": random.choice(self.user_agents)
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "stream" and data.get("url"):
+                    return {
+                        "success": True,
+                        "url": data["url"],
+                        "is_hls": False,
+                        "is_mp4": True,
+                        "title": "Video",
+                        "site": urlparse(url).hostname
+                    }
+        except Exception as e:
+            logger.error(f"Cobalt failed: {str(e)[:50]}")
+        
+        return None
+    
+    def extract(self, url):
+        """Point d'entrée principal optimisé"""
+        cache_key = hashlib.md5(url.encode()).hexdigest()[:16]
+        cached = url_cache.get(cache_key)
+        if cached:
+            return cached
+        
+        try:
+            # Essai d'extraction directe d'abord
+            result = self.extract_direct(url, False)
+            if result and result.get("success"):
+                url_cache.set(cache_key, result)
+                return result
+            
+            # Essai avec proxy
+            if self.proxies_ready:
+                result = self.extract_direct(url, True)
+                if result and result.get("success"):
+                    url_cache.set(cache_key, result)
+                    return result
+            
+            # Essai Cobalt API
+            result = self.extract_with_cobalt_fast(url)
+            if result and result.get("success"):
+                url_cache.set(cache_key, result)
+                return result
+                
+        except Exception as e:
+            logger.error(f"Extraction failed: {str(e)[:100]}")
+        
+        raise Exception("All extraction methods failed")
+
+# Instance globale
+extractor = VideoStreamExtractor()
+
+# --- Routes optimisées pour Expo ---
+
+@app.route("/api/video/info", methods=["GET", "POST"])
+def get_video_info():
+    """Obtenir les infos vidéo (pour prévisualisation)"""
+    url = request.args.get("url") or (request.get_json() or {}).get("url")
+
+    if not url:
+        return jsonify({"success": False, "error": "URL missing"}), 400
+
+    try:
+        result = extractor.extract(url)
+        if result and result.get("success"):
+            return jsonify({
+                "success": True,
+                "title": result.get("title", "Video"),
+                "duration": result.get("duration"),
+                "thumbnail": result.get("thumbnail"),
+                "quality": result.get("quality"),
+                "is_mp4": result.get("is_mp4", False),
+                "is_hls": result.get("is_hls", False),
+                "site": result.get("site"),
+                "filesize": result.get("filesize")
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Video info extraction failed"
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)[:200]
+        }), 500
+
+@app.route("/api/video/stream", methods=["GET", "POST"])
+def stream_video():
+    url = request.args.get("url") or (request.get_json() or {}).get("url")
+    if not url:
+        return jsonify({"success": False, "error": "URL missing"}), 400
+    
+    try:
+        result = extractor.extract(url)
+        if result and result.get("success"):
+            video_url = result["url"]
+            
+            headers = {
+                "User-Agent": random.choice(extractor.user_agents),
+                "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+                "Accept-Ranges": "bytes",
+                "Connection": "keep-alive"
+            }
+            
+            response = requests.get(video_url, headers=headers, stream=True, timeout=30)
+            
+            def generate():
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            
+            response_headers = {
+                'Content-Type': response.headers.get('Content-Type', 'video/mp4'),
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'public, max-age=3600',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range, Content-Type'
+            }
+            
+            return Response(
+                generate(),
+                status=200,
+                headers=response_headers,
+                direct_passthrough=True
+            )
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Video extraction failed"
+            }), 500
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)[:200]
+        }), 500
+
+@app.route("/api/video/url", methods=["GET", "POST"])
+def get_video_url():
+    """Obtenir juste l'URL pour lecture directe"""
+    url = request.args.get("url") or (request.get_json() or {}).get("url")
+
+    if not url:
+        return jsonify({"success": False, "error": "URL missing"}), 400
+
+    try:
+        result = extractor.extract(url)
+        if result and result.get("success"):
+            return jsonify({
+                "success": True,
+                "video_url": result["url"],
+                "title": result.get("title", "Video"),
+                "is_mp4": result.get("is_mp4", False),
+                "is_hls": result.get("is_hls", False)
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": "URL extraction failed"
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)[:200]
+        }), 500
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check pour Render"""
+    return jsonify({
+        "status": "ok", 
+        "cache_size": len(url_cache.cache),
+        "proxies_ready": extractor.proxies_ready
+    })
+
+@app.route("/", methods=["GET"])
+def home():
+    """Documentation API"""
+    return jsonify({
+        "service": "Video Streaming API for Expo",
+        "version": "2.0",
+        "endpoints": {
+            "video_info": "/api/video/info?url=VIDEO_URL - Get video metadata",
+            "video_stream": "/api/video/stream?url=VIDEO_URL - Stream video directly", 
+            "video_url": "/api/video/url?url=VIDEO_URL - Get direct video URL",
+            "health": "/health - Service status"
+        },
+        "usage": {
+            "expo": "Use /api/video/url endpoint with Video component",
+            "streaming": "Use /api/video/stream for direct streaming"
+        }
+    })
+
+@app.route("/api/video/stream", methods=["OPTIONS"])
+@app.route("/api/video/url", methods=["OPTIONS"])
+@app.route("/api/video/info", methods=["OPTIONS"])
+def handle_preflight():
+    """Handle CORS preflight requests"""
+    response = jsonify({})
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Range'
+    return response
+
+# Optimisations pour Render
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(
+        host="0.0.0.0", 
+        port=port, 
+        debug=False,
+        threaded=True,
+        use_reloader=False
+    )
