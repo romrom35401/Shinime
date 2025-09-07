@@ -1,0 +1,1319 @@
+// server.js - Backend de streaming d'anime professionnel
+const express = require('express');
+const cors = require('cors');
+const cheerio = require('cheerio');
+const axios = require('axios');
+const NodeCache = require('node-cache');
+const admin = require('firebase-admin');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Cache pour éviter les requêtes répétitives (TTL: 1 heure)
+const videoCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+const metadataCache = new NodeCache({ stdTTL: 7200 });
+
+// Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+  databaseURL: process.env.FIREBASE_DATABASE_URL
+});
+const db = admin.firestore();
+
+app.use(cors());
+app.use(express.json());
+
+// ===============================
+// 🎯 EXTRACTEURS VIDÉO AVANCÉS AMÉLIORÉS
+// ===============================
+
+class VideoExtractor {
+  static async extract(url, options = {}) {
+    if (!url) throw new Error('URL requise');
+    
+    // Check cache first
+    const cacheKey = `video:${url}`;
+    const cached = videoCache.get(cacheKey);
+    if (cached) return cached;
+    
+    // Si c'est déjà un lien direct
+    if (this.isDirectVideo(url)) {
+      const result = { 
+        url, 
+        type: 'direct',
+        quality: this.detectQuality(url),
+        headers: {}
+      };
+      videoCache.set(cacheKey, result);
+      return result;
+    }
+    
+    // Extraction selon l'hébergeur
+    const hostname = new URL(url).hostname.toLowerCase();
+    let result = null;
+    
+    try {
+      // Sites existants améliorés
+      if (hostname.includes('sibnet.ru')) {
+        result = await this.extractSibnet(url);
+      } else if (hostname.includes('sendvid.com')) {
+        result = await this.extractSendvid(url);
+      } else if (hostname.includes('vk.com')) {
+        result = await this.extractVK(url);
+      } else if (hostname.includes('streamable.com')) {
+        result = await this.extractStreamable(url);
+      } else if (hostname.includes('myvi.tv') || hostname.includes('myvi.ru') || hostname.includes('myvi.top')) {
+        result = await this.extractMyvi(url);
+      } 
+      // Nouveaux extracteurs
+      else if (hostname.includes('vidmoly.net') || hostname.includes('vidmoly.to')) {
+        result = await this.extractVidmoly(url);
+      } else if (hostname.includes('movearnpre.com')) {
+        result = await this.extractMovearnpre(url);
+      } else if (hostname.includes('oneupload.to')) {
+        result = await this.extractOneupload(url);
+      } else if (hostname.includes('smoothpre.com')) {
+        result = await this.extractSmoothpre(url);
+      } else {
+        result = await this.extractGeneric(url);
+      }
+      
+      if (result) {
+        videoCache.set(cacheKey, result);
+        return result;
+      }
+    } catch (error) {
+      console.error(`Extraction failed for ${hostname}:`, error.message);
+      // Essayer l'extracteur générique en cas d'échec
+      try {
+        result = await this.extractGeneric(url);
+        if (result) {
+          videoCache.set(cacheKey, result);
+          return result;
+        }
+      } catch (genericError) {
+        console.error('Generic extraction also failed:', genericError.message);
+      }
+    }
+    
+    throw new Error(`Extraction impossible pour ${hostname}`);
+  }
+  
+  static isDirectVideo(url) {
+    return /\.(mp4|m3u8|webm|mkv|avi|mov)(\?|$|#)/i.test(url);
+  }
+  
+  static detectQuality(url) {
+    if (/1080p|fhd/i.test(url)) return '1080p';
+    if (/720p|hd/i.test(url)) return '720p';
+    if (/480p|sd/i.test(url)) return '480p';
+    if (/360p/i.test(url)) return '360p';
+    return 'auto';
+  }
+
+  // ===============================
+  // EXTRACTEUR VIDMOLY AMÉLIORÉ
+  // ===============================
+  static async extractVidmoly(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Referer': url,
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1'
+        }
+      });
+
+      // 1. Chercher dans player.setup pour les sources m3u8/mp4
+      const playerSetupMatch = data.match(/player\.setup\(\s*\{[\s\S]*?sources:\s*\[\s*\{[\s\S]*?file:\s*["']([^"']+)["'][\s\S]*?\}/i);
+      if (playerSetupMatch && playerSetupMatch[1]) {
+        let videoUrl = playerSetupMatch[1];
+        
+        // Si c'est un fichier m3u8, on peut le convertir ou le retourner tel quel
+        if (videoUrl.includes('.m3u8')) {
+          console.log('Vidmoly: Found m3u8 stream:', videoUrl);
+          return {
+            url: videoUrl,
+            type: 'hls', // HLS stream
+            quality: this.detectQuality(videoUrl),
+            headers: {
+              'Referer': 'https://vidmoly.net/',
+              'Origin': 'https://vidmoly.net',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+          };
+        } else if (videoUrl.includes('.mp4')) {
+          return {
+            url: videoUrl,
+            type: 'mp4',
+            quality: this.detectQuality(videoUrl),
+            headers: {
+              'Referer': 'https://vidmoly.net/',
+              'Origin': 'https://vidmoly.net'
+            }
+          };
+        }
+      }
+
+      // 2. Patterns alternatifs pour Vidmoly
+      const patterns = [
+        /sources:\s*\[\s*{\s*file:\s*["']([^"']+)/i,
+        /file:\s*["']([^"']+\.(mp4|m3u8)[^"']*)/i,
+        /src:\s*["']([^"']+\.(mp4|m3u8)[^"']*)/i,
+        /source\s+src=["']([^"']+\.(mp4|m3u8)[^"']*)/i,
+        /player\.src\(\s*["']([^"']+)/i,
+        /videoUrl['"]\s*:\s*["']([^"']+)/i,
+        /jwplayer[^{]*setup[^{]*file:\s*["']([^"']+)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          let videoUrl = match[1];
+          
+          // Gérer les URLs relatives
+          if (!videoUrl.startsWith('http')) {
+            if (videoUrl.startsWith('//')) {
+              videoUrl = `https:${videoUrl}`;
+            } else {
+              const baseUrl = new URL(url);
+              videoUrl = `${baseUrl.protocol}//${baseUrl.hostname}${videoUrl.startsWith('/') ? '' : '/'}${videoUrl}`;
+            }
+          }
+
+          return {
+            url: videoUrl,
+            type: videoUrl.includes('.m3u8') ? 'hls' : 'mp4',
+            quality: this.detectQuality(videoUrl),
+            headers: {
+              'Referer': 'https://vidmoly.net/',
+              'Origin': 'https://vidmoly.net',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+          };
+        }
+      }
+
+      // 3. Recherche dans les scripts
+      const scriptMatches = data.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+      for (const scriptMatch of scriptMatches) {
+        const scriptContent = scriptMatch[1];
+        
+        // Chercher les URLs directes dans les scripts
+        const urlMatch = scriptContent.match(/(https?:\/\/[^"'\s]+\.(mp4|m3u8)[^"'\s]*)/i);
+        if (urlMatch) {
+          return {
+            url: urlMatch[1],
+            type: urlMatch[2] === 'm3u8' ? 'hls' : 'mp4',
+            quality: this.detectQuality(urlMatch[1]),
+            headers: {
+              'Referer': url,
+              'Origin': new URL(url).origin
+            }
+          };
+        }
+      }
+
+      throw new Error('Vidmoly: video URL not found');
+    } catch (error) {
+      throw new Error(`Vidmoly extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR SIBNET AMÉLIORÉ
+  // ===============================
+  static async extractSibnet(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+          'Referer': url
+        }
+      });
+      
+      // Utiliser cheerio pour parser le HTML
+      const $ = cheerio.load(data);
+      
+      // 1. Chercher dans le wrapper vidéo comme indiqué
+      const videoSrc = $('#video_html5_wrapper_html5_api').attr('src');
+      if (videoSrc) {
+        let videoUrl = videoSrc;
+        
+        // Construire l'URL complète si nécessaire
+        if (!videoUrl.startsWith('http')) {
+          if (videoUrl.startsWith('//')) {
+            videoUrl = `https:${videoUrl}`;
+          } else if (videoUrl.startsWith('/')) {
+            videoUrl = `https://video.sibnet.ru${videoUrl}`;
+          } else {
+            videoUrl = `https://video.sibnet.ru/${videoUrl}`;
+          }
+        }
+
+        return {
+          url: videoUrl,
+          type: 'mp4',
+          quality: this.detectQuality(videoUrl) || 'auto',
+          headers: { 
+            'Referer': 'https://video.sibnet.ru/',
+            'Origin': 'https://video.sibnet.ru'
+          }
+        };
+      }
+
+      // 2. Chercher dans les balises video standard
+      const videoElement = $('video').first();
+      if (videoElement.length) {
+        const src = videoElement.attr('src') || videoElement.find('source').attr('src');
+        if (src) {
+          let videoUrl = src.startsWith('http') ? src : `https://video.sibnet.ru${src}`;
+          return {
+            url: videoUrl,
+            type: 'mp4',
+            quality: this.detectQuality(videoUrl),
+            headers: { 'Referer': 'https://video.sibnet.ru/' }
+          };
+        }
+      }
+      
+      // 3. Patterns de regex améliorés pour Sibnet
+      const patterns = [
+        /src=["']([^"']*\/v\/[^"']*\.mp4[^"']*)/i, // Pattern spécifique pour /v/...mp4
+        /player\.src\(\[{src:\s*["']([^"']+)["']/i,
+        /file:\s*["']([^"']+\.mp4[^"']*)/i,
+        /source\s+src=["']([^"']+\.mp4[^"']*)/i,
+        /videoSrc:\s*["']([^"']+)/i,
+        /mp4:\s*["']([^"']+)/i,
+        /video\.src\s*=\s*["']([^"']+)/i,
+        /"file":\s*["']([^"']+\.mp4[^"']*)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          let videoUrl = match[1];
+          
+          // Construire l'URL complète si nécessaire
+          if (!videoUrl.startsWith('http')) {
+            if (videoUrl.startsWith('//')) {
+              videoUrl = `https:${videoUrl}`;
+            } else if (videoUrl.startsWith('/')) {
+              videoUrl = `https://video.sibnet.ru${videoUrl}`;
+            } else {
+              videoUrl = `https://video.sibnet.ru/${videoUrl}`;
+            }
+          }
+
+          return {
+            url: videoUrl,
+            type: 'mp4',
+            quality: this.detectQuality(videoUrl) || 'auto',
+            headers: { 
+              'Referer': 'https://video.sibnet.ru/',
+              'Origin': 'https://video.sibnet.ru'
+            }
+          };
+        }
+      }
+
+      // 4. Recherche dans les scripts JavaScript
+      const scriptMatches = data.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+      for (const scriptMatch of scriptMatches) {
+        const scriptContent = scriptMatch[1];
+        
+        // Chercher les URLs Sibnet dans les scripts
+        const urlMatch = scriptContent.match(/https?:\/\/[^"'\s]*video\.sibnet\.ru[^"'\s]*\.mp4[^"'\s]*/i);
+        if (urlMatch) {
+          return {
+            url: urlMatch[0],
+            type: 'mp4',
+            quality: this.detectQuality(urlMatch[0]),
+            headers: { 'Referer': 'https://video.sibnet.ru/' }
+          };
+        }
+      }
+      
+      throw new Error('Sibnet: video URL not found');
+    } catch (error) {
+      throw new Error(`Sibnet extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR SENDVID (déjà fonctionnel mais amélioré)
+  // ===============================
+  static async extractSendvid(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Referer': url
+        }
+      });
+
+      // Sendvid patterns
+      const patterns = [
+        /og:video"\s+content="([^"]+)/i,
+        /property="og:video:secure_url"\s+content="([^"]+)/i,
+        /file:\s*["']([^"']+\.mp4[^"']*)/i,
+        /sources:\s*\[\s*{\s*src:\s*["']([^"']+)/i,
+        /"contentUrl":\s*["']([^"']+)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          return {
+            url: match[1],
+            type: 'mp4',
+            quality: this.detectQuality(match[1]),
+            headers: {
+              'Referer': 'https://sendvid.com/',
+              'Origin': 'https://sendvid.com'
+            }
+          };
+        }
+      }
+
+      throw new Error('Sendvid: video URL not found');
+    } catch (error) {
+      throw new Error(`Sendvid extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR MOVEARNPRE
+  // ===============================
+  static async extractMovearnpre(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': '*/*',
+          'Referer': url
+        }
+      });
+
+      // Movearnpre utilise souvent des iframes
+      const iframeMatch = data.match(/<iframe[^>]+src=["']([^"']+)/i);
+      if (iframeMatch) {
+        const iframeUrl = iframeMatch[1].startsWith('http') ? 
+          iframeMatch[1] : `https:${iframeMatch[1]}`;
+        
+        // Récupérer le contenu de l'iframe
+        const { data: iframeData } = await axios.get(iframeUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': url
+          }
+        });
+
+        // Chercher la vidéo dans l'iframe
+        const videoPatterns = [
+          /sources:\s*\[\s*{\s*src:\s*["']([^"']+)/i,
+          /file:\s*["']([^"']+\.mp4[^"']*)/i,
+          /videoUrl:\s*["']([^"']+)/i,
+          /mp4:\s*["']([^"']+)/i
+        ];
+
+        for (const pattern of videoPatterns) {
+          const match = iframeData.match(pattern);
+          if (match && match[1]) {
+            return {
+              url: match[1],
+              type: 'mp4',
+              quality: 'auto',
+              headers: {
+                'Referer': iframeUrl,
+                'Origin': new URL(iframeUrl).origin
+              }
+            };
+          }
+        }
+      }
+
+      // Recherche directe
+      const directPatterns = [
+        /videoUrl:\s*["']([^"']+)/i,
+        /source:\s*["']([^"']+\.mp4[^"']*)/i,
+        /file:\s*["']([^"']+)/i
+      ];
+
+      for (const pattern of directPatterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          return {
+            url: match[1],
+            type: 'mp4',
+            quality: 'auto',
+            headers: {
+              'Referer': url
+            }
+          };
+        }
+      }
+
+      throw new Error('Movearnpre: video URL not found');
+    } catch (error) {
+      throw new Error(`Movearnpre extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR ONEUPLOAD
+  // ===============================
+  static async extractOneupload(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Referer': url
+        }
+      });
+
+      // Oneupload peut avoir un bouton de téléchargement
+      const downloadMatch = data.match(/href=["']([^"']+\.mp4[^"']*download[^"']*)/i);
+      if (downloadMatch) {
+        return {
+          url: downloadMatch[1],
+          type: 'mp4',
+          quality: 'auto',
+          headers: {
+            'Referer': 'https://oneupload.to/'
+          }
+        };
+      }
+
+      // Patterns standards
+      const patterns = [
+        /sources:\s*\[\s*{\s*file:\s*["']([^"']+)/i,
+        /videojs[^{]*{[^}]*src:\s*["']([^"']+)/i,
+        /file:\s*["']([^"']+\.mp4[^"']*)/i,
+        /source\s+src=["']([^"']+\.mp4[^"']*)/i,
+        /video-js[^>]+data-setup=[^>]*sources[^>]*src[^>]*["']([^"']+)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          let videoUrl = match[1];
+          
+          if (!videoUrl.startsWith('http')) {
+            const baseUrl = new URL(url);
+            videoUrl = `${baseUrl.protocol}//${baseUrl.hostname}${videoUrl}`;
+          }
+
+          return {
+            url: videoUrl,
+            type: 'mp4',
+            quality: 'auto',
+            headers: {
+              'Referer': 'https://oneupload.to/',
+              'Origin': 'https://oneupload.to'
+            }
+          };
+        }
+      }
+
+      // Recherche de liens CDN
+      const cdnMatch = data.match(/https?:\/\/cdn[^"'\s]+\.mp4[^"'\s]*/i);
+      if (cdnMatch) {
+        return {
+          url: cdnMatch[0],
+          type: 'mp4',
+          quality: 'auto',
+          headers: {
+            'Referer': url
+          }
+        };
+      }
+
+      throw new Error('Oneupload: video URL not found');
+    } catch (error) {
+      throw new Error(`Oneupload extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR SMOOTHPRE
+  // ===============================
+  static async extractSmoothpre(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': url
+        }
+      });
+
+      // Smoothpre patterns
+      const patterns = [
+        /playerInstance\.setup\(\s*{\s*file:\s*["']([^"']+)/i,
+        /jwplayer[^{]*setup[^{]*file:\s*["']([^"']+)/i,
+        /sources:\s*\[\s*{\s*file:\s*["']([^"']+)/i,
+        /file:\s*["']([^"']+\.mp4[^"']*)/i,
+        /videoUrl:\s*["']([^"']+)/i,
+        /streamUrl:\s*["']([^"']+)/i
+      ];
+
+      for (const pattern of patterns) {
+        const match = data.match(pattern);
+        if (match && match[1]) {
+          let videoUrl = match[1];
+          
+          // Gérer les URLs relatives
+          if (!videoUrl.startsWith('http')) {
+            if (videoUrl.startsWith('//')) {
+              videoUrl = `https:${videoUrl}`;
+            } else {
+              const baseUrl = new URL(url);
+              videoUrl = `${baseUrl.protocol}//${baseUrl.hostname}${videoUrl}`;
+            }
+          }
+
+          return {
+            url: videoUrl,
+            type: videoUrl.includes('.m3u8') ? 'hls' : 'mp4',
+            quality: this.detectQuality(videoUrl),
+            headers: {
+              'Referer': url,
+              'Origin': new URL(url).origin
+            }
+          };
+        }
+      }
+
+      // Recherche dans les scripts externes
+      const scriptMatches = data.matchAll(/<script[^>]+src=["']([^"']+)/gi);
+      for (const scriptMatch of scriptMatches) {
+        if (scriptMatch[1].includes('player') || scriptMatch[1].includes('video')) {
+          try {
+            const { data: scriptData } = await axios.get(
+              scriptMatch[1].startsWith('http') ? scriptMatch[1] : `https:${scriptMatch[1]}`,
+              { headers: { 'Referer': url } }
+            );
+            
+            const videoMatch = scriptData.match(/https?:\/\/[^"'\s]+\.(mp4|m3u8)[^"'\s]*/);
+            if (videoMatch) {
+              return {
+                url: videoMatch[0],
+                type: videoMatch[1] === 'm3u8' ? 'hls' : 'mp4',
+                quality: 'auto',
+                headers: {
+                  'Referer': url
+                }
+              };
+            }
+          } catch (e) {
+            console.warn('Failed to fetch script:', e.message);
+          }
+        }
+      }
+
+      throw new Error('Smoothpre: video URL not found');
+    } catch (error) {
+      throw new Error(`Smoothpre extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // AMÉLIORATION DE L'EXTRACTEUR VK
+  // ===============================
+  static async extractVK(url) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+          'Accept': 'text/html,application/xhtml+xml'
+        }
+      });
+      
+      // VK utilise différents patterns selon la qualité
+      const qualities = {
+        '2160': data.match(/"url2160":"([^"]+)"/),
+        '1440': data.match(/"url1440":"([^"]+)"/),
+        '1080': data.match(/"url1080":"([^"]+)"/),
+        '720': data.match(/"url720":"([^"]+)"/),
+        '480': data.match(/"url480":"([^"]+)"/),
+        '360': data.match(/"url360":"([^"]+)"/),
+        '240': data.match(/"url240":"([^"]+)"/),
+      };
+      
+      // Prendre la meilleure qualité disponible
+      for (const [quality, match] of Object.entries(qualities)) {
+        if (match && match[1]) {
+          let videoUrl = match[1].replace(/\\/g, '');
+          
+          // Décoder les caractères échappés
+          videoUrl = decodeURIComponent(videoUrl);
+          
+          return {
+            url: videoUrl,
+            type: 'mp4',
+            quality: `${quality}p`,
+            headers: { 
+              'Referer': 'https://vk.com/',
+              'Origin': 'https://vk.com'
+            }
+          };
+        }
+      }
+      
+      // Recherche alternative avec al_video.php
+      const videoIdMatch = url.match(/video(-?\d+_\d+)/);
+      if (videoIdMatch) {
+        try {
+          const apiUrl = `https://vk.com/al_video.php`;
+          const { data: apiData } = await axios.post(apiUrl, 
+            `act=show&al=1&video=${videoIdMatch[1]}`, 
+            {
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': url
+              }
+            }
+          );
+          
+          const urlMatch = apiData.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
+          if (urlMatch) {
+            return {
+              url: urlMatch[0],
+              type: 'mp4',
+              quality: 'auto',
+              headers: { 'Referer': 'https://vk.com/' }
+            };
+          }
+        } catch (e) {
+          console.warn('VK API fallback failed:', e.message);
+        }
+      }
+      
+      // Fallback final
+      const fallback = data.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
+      if (fallback) {
+        return {
+          url: fallback[0],
+          type: 'mp4',
+          quality: 'auto',
+          headers: { 'Referer': 'https://vk.com/' }
+        };
+      }
+      
+      throw new Error('VK: video URL not found');
+    } catch (error) {
+      throw new Error(`VK extraction failed: ${error.message}`);
+    }
+  }
+
+  // ===============================
+  // AMÉLIORATION DE L'EXTRACTEUR MYVI
+  // ===============================
+static async extractMyvi(url) {
+  try {
+    // Gérer les différents domaines Myvi
+    const hostname = new URL(url).hostname;
+    const refererBase = `https://${hostname}/`;
+
+    const { data } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Referer': refererBase
+      }
+    });
+
+    // Patterns améliorés pour Myvi
+    const patterns = [
+      /dataUrl:\s*["']([^"']+)/,
+      /video\.src\s*=\s*["']([^"']+)/,
+      /PlayerLoader\.CreatePlayer\(.*?["']([^"']+\.mp4[^"']*)/,
+      /sprutoPlayer\(['"]([^'"]+)/,
+      /file:\s*["']([^"']+\.mp4[^"']*)/,
+      /sources:\s*\[\s*{\s*src:\s*["']([^"']+)/
+    ];
+    
+    // Parcourir les patterns pour trouver l'URL de la vidéo
+    for (const pattern of patterns) {
+      const match = data.match(pattern);
+      if (match && match[1]) {
+        let videoUrl = match[1];
+
+        // Gérer les URLs relatives
+        if (!videoUrl.startsWith('http')) {
+          if (videoUrl.startsWith('//')) {
+            videoUrl = `https:${videoUrl}`;
+          } else {
+            videoUrl = `${refererBase}${videoUrl.replace(/^\//, '')}`;
+          }
+        }
+
+        // Si c'est une URL d'API, la résoudre
+        if (videoUrl.includes('/player/api/') || videoUrl.includes('/embed/')) {
+          try {
+            const { data: apiData } = await axios.get(videoUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0',
+                'Referer': url
+              }
+            });
+
+            const videoMatch = apiData.match(/https?:\/\/[^"'\s]+\.(mp4|m3u8)[^"'\s]*/);
+            if (videoMatch) {
+              videoUrl = videoMatch[0];
+            }
+          } catch (e) {
+            console.warn('Myvi API resolution failed:', e.message);
+          }
+        }
+
+        return {
+          url: videoUrl,
+          type: videoUrl.includes('.m3u8') ? 'hls' : 'mp4',
+          quality: this.detectQuality(videoUrl) || 'auto',
+          headers: {
+            'Referer': refererBase,
+            'Origin': refererBase.replace(/\/$/, '')
+          }
+        };
+      }
+    }
+
+    throw new Error('Myvi: video URL not found');
+  } catch (error) {
+    throw new Error(`Myvi extraction failed: ${error.message}`);
+  }
+}
+        
+  // ===============================
+  // FONCTION UTILITAIRE: UNPACKER JS
+  // ===============================
+  static unpackJs(packedJs) {
+    try {
+      // Simple unpacker pour le JavaScript packé (format Dean Edwards)
+      const unpackRegex = /eval$function\(p,a,c,k,e,d${.*?}$'(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'$/;
+      const match = packedJs.match(unpackRegex);
+      
+      if (!match) return packedJs;
+      
+      const [, payload, radix, count, words] = match;
+      const wordArray = words.split('|');
+      
+      // Fonction de décodage simplifiée
+      let decoded = payload;
+      for (let i = wordArray.length - 1; i >= 0; i--) {
+        const word = wordArray[i];
+        if (word) {
+          const pattern = new RegExp(`\\b${i.toString(parseInt(radix))}\\b`, 'g');
+          decoded = decoded.replace(pattern, word);
+        }
+      }
+      
+      return decoded;
+    } catch (e) {
+      console.warn('JS unpacking failed:', e.message);
+      return packedJs;
+    }
+  }
+
+  // ===============================
+  // EXTRACTEUR GÉNÉRIQUE AMÉLIORÉ
+  // ===============================
+static async extractGeneric(url) {
+  try {
+    const { data } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+
+    const $ = cheerio.load(data);
+
+    // 1. Chercher les balises video/source
+    let videoSrc = $('video source').attr('src') ||
+                   $('video').attr('src') ||
+                   $('video').attr('data-src');
+
+    if (videoSrc) {
+      if (videoSrc.startsWith('//')) {
+        videoSrc = `https:${videoSrc}`;
+      } else if (!videoSrc.startsWith('http')) {
+        const baseUrl = new URL(url);
+        videoSrc = `${baseUrl.protocol}//${baseUrl.hostname}${videoSrc}`;
+      }
+      return {
+        url: videoSrc,
+        type: this.isDirectVideo(videoSrc) ? 'direct' : 'unknown',
+        quality: this.detectQuality(videoSrc),
+        headers: { Referer: url }
+      };
+    }
+
+    // 2. Chercher les iframes d'embed
+    const iframeSrc = $('iframe[src*="embed"]').attr('src') ||
+                      $('iframe[src*="player"]').attr('src') ||
+                      $('iframe[src*="video"]').attr('src');
+
+    if (iframeSrc) {
+      // Si on trouve une iframe, essayer d'extraire depuis son contenu
+      let iframeUrl = iframeSrc.startsWith('//') ? `https:${iframeSrc}` : iframeSrc;
+      try {
+        const { data: iframeData } = await axios.get(iframeUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0', Referer: url }
+        });
+        const videoMatch = iframeData.match(/https?:\/\/[^"'\s]+\.(mp4|m3u8)[^"'\s]*/);
+        if (videoMatch) {
+          return {
+            url: videoMatch[0],
+            type: videoMatch[1] === 'm3u8' ? 'hls' : 'mp4',
+            quality: this.detectQuality(videoMatch[0]),
+            headers: { Referer: iframeUrl }
+          };
+        }
+      } catch (e) {
+        console.warn('Failed to extract from iframe:', e.message);
+      }
+    }
+
+    // 3. Recherche de patterns dans le code source
+    const patterns = [
+      /sources:\s*\[\s*{\s*file:\s*["']([^"']+)/i,
+      /file:\s*["']([^"']+\.(mp4|m3u8)[^"']*)/i,
+      /videoUrl['"]\s*:\s*["']([^"']+)/i,
+      /source\s+src=["']([^"']+\.(mp4|m3u8)[^"']*)/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = data.match(pattern);
+      if (match && match[1]) {
+        let videoUrl = match[1];
+        if (!videoUrl.startsWith('http')) {
+          const baseUrl = new URL(url);
+          videoUrl = `${baseUrl.protocol}//${baseUrl.hostname}${videoUrl}`;
+        }
+        return {
+          url: videoUrl,
+          type: videoUrl.includes('.m3u8') ? 'hls' : 'mp4',
+          quality: this.detectQuality(videoUrl),
+          headers: { Referer: url }
+        };
+      }
+    }
+    
+    // 4. Recherche de liens directs
+    const directMatch = data.match(/https?:\/\/[^"'\s]+\.(mp4|m3u8|webm|mkv|avi|mov)(\?|#|$)/i);
+    if (directMatch) {
+        return {
+            url: directMatch[0],
+            type: directMatch[1] === 'm3u8' ? 'hls' : 'mp4',
+            quality: this.detectQuality(directMatch[0]),
+            headers: { Referer: url }
+        };
+    }
+
+    throw new Error('Generic: video URL not found');
+  } catch (error) {
+    throw new Error(`Generic extraction failed: ${error.message}`);
+  }
+}
+}
+// ===============================
+// 🎬 GESTIONNAIRE D'ANIME
+// ===============================
+
+class AnimeManager {
+  static async getAnimeDetails(animeId) {
+    const cacheKey = `anime:${animeId}`;
+    const cached = metadataCache.get(cacheKey);
+    if (cached) return cached;
+    
+    try {
+      // Chercher dans plusieurs collections possibles
+      const collections = ['animesDetails', 'animes', 'anime'];
+      
+      for (const col of collections) {
+        const doc = await db.collection(col).doc(animeId).get();
+        if (doc.exists) {
+          const data = doc.data();
+          metadataCache.set(cacheKey, data);
+          return data;
+        }
+      }
+      
+      // Recherche par titre si l'ID ne marche pas
+      const searchResult = await this.searchByTitle(animeId);
+      if (searchResult) {
+        metadataCache.set(cacheKey, searchResult);
+        return searchResult;
+      }
+      
+    } catch (error) {
+      console.error('Firebase error:', error);
+    }
+    
+    return null;
+  }
+  
+  static async searchByTitle(title) {
+    const normalized = this.normalizeTitle(title);
+    const collections = ['animesDetails', 'animes'];
+    
+    for (const col of collections) {
+      const snapshot = await db.collection(col)
+        .where('normalized', '==', normalized)
+        .limit(1)
+        .get();
+      
+      if (!snapshot.empty) {
+        return snapshot.docs[0].data();
+      }
+    }
+    
+    return null;
+  }
+  
+  static normalizeTitle(title) {
+    return title
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+  
+  static formatEpisodeData(episodes, animeTitle) {
+    const formatted = [];
+    
+    if (typeof episodes === 'object' && !Array.isArray(episodes)) {
+      // Format: { "Saison 1": [...], "Saison 2": [...] }
+      for (const [season, eps] of Object.entries(episodes)) {
+        if (Array.isArray(eps)) {
+          eps.forEach(ep => {
+            formatted.push(this.formatSingleEpisode(ep, season, animeTitle));
+          });
+        }
+      }
+    } else if (Array.isArray(episodes)) {
+      // Format: [ep1, ep2, ...]
+      episodes.forEach(ep => {
+        formatted.push(this.formatSingleEpisode(ep, 'Saison 1', animeTitle));
+      });
+    }
+    
+    return formatted;
+  }
+  
+  static formatSingleEpisode(ep, season, animeTitle) {
+    return {
+      id: ep.id || `${season}-${ep.index || ep.number}`,
+      number: ep.index || ep.number || 1,
+      title: ep.name || ep.title || `Épisode ${ep.index || ep.number}`,
+      season,
+      animeTitle,
+      thumbnail: ep.thumbnail || null,
+      duration: ep.duration || null,
+      releaseDate: ep.release_date || ep.date || null,
+      languages: this.normalizeLanguages(ep.languages || ep),
+      metadata: {
+        views: ep.views || 0,
+        isNew: this.isNewEpisode(ep.release_date || ep.date),
+        isPremium: ep.premium || false
+      }
+    };
+  }
+  
+  static normalizeLanguages(langs) {
+    const normalized = {};
+    
+    if (typeof langs === 'object') {
+      for (const [lang, urls] of Object.entries(langs)) {
+        if (Array.isArray(urls)) {
+          normalized[lang.toUpperCase()] = urls.filter(Boolean);
+        } else if (typeof urls === 'string') {
+          normalized[lang.toUpperCase()] = [urls];
+        }
+      }
+    }
+    
+    // Fallback pour les vieilles structures
+    ['VOSTFR', 'VF', 'VO'].forEach(lang => {
+      if (langs[lang] && !normalized[lang]) {
+        normalized[lang] = Array.isArray(langs[lang]) ? langs[lang] : [langs[lang]];
+      }
+    });
+    
+    return normalized;
+  }
+  
+  static isNewEpisode(date) {
+    if (!date) return false;
+    const releaseDate = new Date(date);
+    const daysSince = (Date.now() - releaseDate) / (1000 * 60 * 60 * 24);
+    return daysSince <= 7;
+  }
+}
+
+// ===============================
+// 📡 ENDPOINTS API
+// ===============================
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    version: '2.0',
+    cache: {
+      videos: videoCache.keys().length,
+      metadata: metadataCache.keys().length
+    }
+  });
+});
+
+// Extraction vidéo simple (compatibilité)
+app.get('/api/extract', async (req, res) => {
+  const { url } = req.query;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'URL manquante' });
+  }
+  
+  try {
+    const result = await VideoExtractor.extract(url);
+    res.json(result);
+  } catch (error) {
+    console.error('Extraction error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      url 
+    });
+  }
+});
+
+// 🎯 Endpoint principal : récupération complète d'un anime
+app.get('/api/anime/:animeId', async (req, res) => {
+  const { animeId } = req.params;
+  
+  try {
+    const anime = await AnimeManager.getAnimeDetails(animeId);
+    
+    if (!anime) {
+      return res.status(404).json({ error: 'Anime non trouvé' });
+    }
+    
+    // Formater les épisodes
+    const episodes = AnimeManager.formatEpisodeData(
+      anime.episodes, 
+      anime.title || animeId
+    );
+    
+    res.json({
+      id: animeId,
+      title: anime.title,
+      description: anime.description || anime.synopsis,
+      poster: anime.posterImage || anime.image,
+      banner: anime.bannerImage || anime.poster,
+      genres: anime.genres || [],
+      rating: anime.rating || anime.score,
+      year: anime.year || anime.releaseYear,
+      status: anime.status,
+      episodes,
+      episodeCount: episodes.length,
+      seasons: [...new Set(episodes.map(e => e.season))],
+      metadata: {
+        views: anime.views || 0,
+        likes: anime.likes || 0,
+        isPopular: anime.isPopular || false,
+        lastUpdated: anime.lastUpdated || new Date().toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error('Anime fetch error:', error);
+    res.status(500).json({ 
+      error: 'Erreur serveur',
+      details: error.message 
+    });
+  }
+});
+
+// 🎬 Endpoint streaming : prépare un épisode pour la lecture
+app.post('/api/stream/prepare', async (req, res) => {
+  const { episodeId, language = 'VOSTFR', preferredQuality = 'auto' } = req.body;
+  
+  if (!episodeId) {
+    return res.status(400).json({ error: 'Episode ID requis' });
+  }
+  
+  try {
+    // Récupérer l'épisode depuis le cache ou Firebase
+    const [animeId, ...rest] = episodeId.split('-');
+    const anime = await AnimeManager.getAnimeDetails(animeId);
+    
+    if (!anime) {
+      return res.status(404).json({ error: 'Anime non trouvé' });
+    }
+    
+    // Trouver l'épisode spécifique
+    const episodes = AnimeManager.formatEpisodeData(anime.episodes, anime.title);
+    const episode = episodes.find(e => e.id === episodeId);
+    
+    if (!episode) {
+      return res.status(404).json({ error: 'Épisode non trouvé' });
+    }
+    
+    // Sélectionner les URLs pour la langue demandée
+    const urls = episode.languages[language] || 
+                 episode.languages.VOSTFR || 
+                 episode.languages.VF || 
+                 Object.values(episode.languages)[0] || [];
+    
+    if (!urls.length) {
+      return res.status(404).json({ error: 'Aucun lien disponible' });
+    }
+    
+    // Essayer d'extraire le meilleur lien
+    let bestStream = null;
+    const attempts = [];
+    
+    for (const url of urls) {
+      try {
+        const extracted = await VideoExtractor.extract(url);
+        
+        // Scorer selon la qualité
+        const qualityScore = {
+          '1080p': 100,
+          '720p': 80,
+          '480p': 60,
+          '360p': 40,
+          'auto': 50
+        };
+        
+        extracted.score = qualityScore[extracted.quality] || 30;
+        attempts.push(extracted);
+        
+        // Si on a du 720p ou mieux, on s'arrête
+        if (extracted.score >= 80) {
+          bestStream = extracted;
+          break;
+        }
+        
+      } catch (error) {
+        console.warn(`Failed to extract ${url}:`, error.message);
+        attempts.push({ url, error: error.message, score: 0 });
+      }
+    }
+    
+    // Prendre le meilleur score
+    if (!bestStream && attempts.length) {
+      bestStream = attempts.sort((a, b) => b.score - a.score)[0];
+    }
+    
+    if (!bestStream || bestStream.error) {
+      return res.status(500).json({ 
+        error: 'Extraction échouée',
+        attempts 
+      });
+    }
+    
+    // Créer un token de session (optionnel, pour tracking)
+    const sessionToken = Buffer.from(`${episodeId}:${Date.now()}`).toString('base64');
+    
+    res.json({
+      success: true,
+      stream: bestStream,
+      episode: {
+        id: episode.id,
+        title: episode.title,
+        number: episode.number,
+        season: episode.season,
+        thumbnail: episode.thumbnail,
+        nextEpisodeId: episodes[episodes.indexOf(episode) + 1]?.id || null
+      },
+      session: sessionToken,
+      availableLanguages: Object.keys(episode.languages),
+      alternativeStreams: attempts.filter(a => !a.error && a.url !== bestStream.url)
+    });
+    
+  } catch (error) {
+    console.error('Stream preparation error:', error);
+    res.status(500).json({ 
+      error: 'Erreur de préparation du stream',
+      details: error.message 
+    });
+  }
+});
+
+// 📊 Analytics endpoint (pour tracker les vues)
+app.post('/api/analytics/view', async (req, res) => {
+  const { episodeId, duration, sessionToken } = req.body;
+  
+  // Ici tu peux logger les vues dans Firebase ou une autre DB
+  console.log('View tracked:', { episodeId, duration, sessionToken });
+  
+  res.json({ success: true });
+});
+
+// 🔍 Recherche d'anime
+app.get('/api/search', async (req, res) => {
+  const { q, limit = 10 } = req.query;
+  
+  if (!q || q.length < 2) {
+    return res.status(400).json({ error: 'Requête trop courte' });
+  }
+  
+  try {
+    const normalized = AnimeManager.normalizeTitle(q);
+    const results = [];
+    
+    // Recherche dans Firestore
+    const snapshot = await db.collection('animes')
+      .orderBy('title')
+      .limit(parseInt(limit))
+      .get();
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      const titleNorm = AnimeManager.normalizeTitle(data.title || '');
+      
+      if (titleNorm.includes(normalized) || 
+          (data.title_en && AnimeManager.normalizeTitle(data.title_en).includes(normalized))) {
+        results.push({
+          id: doc.id,
+          title: data.title,
+          poster: data.posterImage || data.image,
+          year: data.year,
+          score: data.score || data.rating
+        });
+      }
+    });
+    
+    res.json({ results });
+    
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Erreur de recherche' });
+  }
+});
+
+// Démarrage du serveur
+app.listen(PORT, () => {
+  console.log(`🚀 Anime Backend v2.0 running on port ${PORT}`);
+  console.log(`📡 Extraction endpoint: /api/extract`);
+  console.log(`🎬 Anime endpoint: /api/anime/:id`);
+  console.log(`▶️ Stream endpoint: /api/stream/prepare`);
+});
+
+module.exports = app;
